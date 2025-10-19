@@ -20,6 +20,7 @@ default = [
     "convolution",
     "cubecl-core/default",
     "cubecl-cuda?/default",
+    "cubecl-cpu?/default",
     "cubecl-hip?/default",
     "cubecl-wgpu?/default",
 ]
@@ -82,9 +83,4 @@ required-features = ["random"]
 [[bench]]
 harness = false
 name = "rms_norm"
-required-features = ["random"]
-
-[[bin]]
-name = "rms_norm"
-path = "src/bin/rms_norm.rs"
 required-features = ["random"]

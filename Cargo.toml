@@ -5,29 +5,6 @@
 resolver = "2"
 
 members = ["crates/*", "examples/*", "xtask"]
-default-members = [
-    "crates/cubecl",
-    "crates/cubecl-common",
-    "crates/cubecl-core",
-    "crates/cubecl-cpp",
-    "crates/cubecl-ir",
-    "crates/cubecl-macros",
-    "crates/cubecl-macros-internal",
-    "crates/cubecl-runtime",
-    "crates/cubecl-std",
-    "crates/cubecl-opt",
-    "crates/cubecl-cuda",
-    "crates/cubecl-hip",
-    "crates/cubecl-wgpu",
-    "crates/cubecl-convolution",
-    "crates/cubecl-matmul",
-    "crates/cubecl-reduce",
-    "crates/cubecl-random",
-    "crates/cubecl-quant",
-    "crates/cubecl-attention",
-    "crates/cubecl-spirv",
-    "xtask",
-]
 
 [workspace.package]
 edition = "2024"

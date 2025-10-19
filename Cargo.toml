@@ -150,6 +150,3 @@ opt-level = 0
 
 [profile.dev.build-override]
 opt-level = 3
-
-[patch.crates-io]
-tracel-llvm-bundler = { path = "crates/tracel-llvm-bundler" }

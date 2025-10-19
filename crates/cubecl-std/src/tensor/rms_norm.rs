@@ -129,6 +129,7 @@ fn rms_norm_kernel<F: Float>(
             }
 
             local_count += 1;
+            #[cfg(debug_assertions)]
             if local_count > MAX_LINES_PER_THREAD {
                 terminate!();
             }
@@ -253,6 +254,7 @@ fn rms_norm_bias_kernel<F: Float>(
             }
 
             local_count += 1;
+            #[cfg(debug_assertions)]
             if local_count > MAX_LINES_PER_THREAD {
                 terminate!();
             }

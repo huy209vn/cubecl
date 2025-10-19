@@ -4,20 +4,22 @@
 //! dimension to be contiguous. The kernels are vectorized whenever the runtime allows it and can
 //! optionally fuse a bias addition after the scaling step.
 
-use core::{cmp, convert::TryFrom};
+use core::{any::TypeId, cmp, convert::TryFrom};
 
 use cubecl::frontend::{Recip, Sqrt};
 use cubecl::prelude::*;
 use cubecl::tensor_line_size_parallel;
 use cubecl_core as cubecl;
+use cubecl_runtime::features::Plane;
 
 use super::TensorHandle;
 
-const MAX_LINES_PER_THREAD: u32 = 256;
+const MAX_LINES_PER_THREAD: u32 = 64;
 const MAX_SUBGROUPS_PER_ROW: u32 = 32;
+const LINES_PER_LANE_TARGET: u32 = 4;
 
 #[cube]
-fn reduce_sum_with_shuffle(value: f32, subgroup_size: u32) -> f32 {
+fn reduce_sum_with_shuffle(value: f32, subgroup_size: u32, lane_id: u32) -> f32 {
     if subgroup_size == 0 {
         value
     } else {
@@ -31,8 +33,26 @@ fn reduce_sum_with_shuffle(value: f32, subgroup_size: u32) -> f32 {
             }
             sum
         } else {
-            plane_sum(sum)
+            if lane_id == 0 {
+                let mut idx = 1u32;
+                while idx < subgroup_size {
+                    sum += plane_shuffle(value, idx);
+                    idx += 1;
+                }
+            }
+            plane_broadcast(sum, 0)
         }
+    }
+}
+
+#[cube]
+fn compute_inv_rms(total_sum: f32, axis_size: f32, eps: f32, allow_native_rsqrt: bool) -> f32 {
+    let mean = total_sum / axis_size;
+    let denom = mean + eps;
+    if allow_native_rsqrt {
+        Recip::recip(Sqrt::sqrt(denom))
+    } else {
+        1.0f32 / Sqrt::sqrt(denom)
     }
 }
 
@@ -45,6 +65,7 @@ fn rms_norm_kernel<F: Float>(
     lines_per_row: u32,
     axis_size: u32,
     eps: f32,
+    use_fast_rsqrt: u32,
 ) {
     let row = CUBE_POS_X;
 
@@ -65,8 +86,7 @@ fn rms_norm_kernel<F: Float>(
 
     let mut partial_sum = 0.0f32;
     let mut local_count = 0u32;
-    let mut shared_partials = SharedMemory::<f32>::new(MAX_SUBGROUPS_PER_ROW);
-    let mut shared_inv = SharedMemory::<f32>::new(1u32);
+    let allow_native_rsqrt = use_fast_rsqrt != 0;
     if is_active_lane {
         let mut line_index = thread_linear;
         while line_index < lines_per_row {
@@ -88,14 +108,22 @@ fn rms_norm_kernel<F: Float>(
         }
     }
 
-    let subgroup_sum = reduce_sum_with_shuffle(partial_sum, subgroup_size);
+    let subgroup_sum = reduce_sum_with_shuffle(partial_sum, subgroup_size, lane_id);
+    let axis = axis_size as f32;
 
-    if is_active_lane && lane_id == 0 {
-        shared_partials[subgroup_id] = subgroup_sum;
-    }
-    sync_cube();
+    let inv_rms = if subgroups_per_row == 1u32 {
+        let mut inv = 0.0f32;
+        if lane_id == 0 {
+            inv = compute_inv_rms(subgroup_sum, axis, eps, allow_native_rsqrt);
+        }
+        plane_broadcast(inv, 0)
+    } else {
+        let mut shared_partials = SharedMemory::<f32>::new(MAX_SUBGROUPS_PER_ROW);
+        if is_active_lane && lane_id == 0 {
+            shared_partials[subgroup_id] = subgroup_sum;
+        }
+        sync_cube();
 
-    if subgroups_per_row > 1u32 {
         if subgroup_id == 0 {
             let mut accumulator = 0.0f32;
             let mut idx = lane_id;
@@ -103,26 +131,22 @@ fn rms_norm_kernel<F: Float>(
                 accumulator += shared_partials[idx];
                 idx += subgroup_size;
             }
-            let reduced = reduce_sum_with_shuffle(accumulator, subgroup_size);
+            let reduced = reduce_sum_with_shuffle(accumulator, subgroup_size, lane_id);
             if lane_id == 0 {
                 shared_partials[0] = reduced;
             }
         }
         sync_cube();
-    }
 
-    let total_sum = shared_partials[0];
+        let total_sum = shared_partials[0];
+        let mut shared_inv = SharedMemory::<f32>::new(1u32);
+        if subgroup_id == 0 && lane_id == 0 {
+            shared_inv[0] = compute_inv_rms(total_sum, axis, eps, allow_native_rsqrt);
+        }
+        sync_cube();
+        shared_inv[0]
+    };
 
-    if subgroup_id == 0 && lane_id == 0 {
-        let axis = axis_size as f32;
-        let mean = total_sum / axis;
-        let denom = mean + eps;
-        let inv = Recip::recip(Sqrt::sqrt(denom));
-        shared_inv[0] = inv;
-    }
-    sync_cube();
-
-    let inv_rms = shared_inv[0];
     if is_active_lane {
         let mut iteration = 0u32;
         while iteration < local_count {
@@ -158,6 +182,7 @@ fn rms_norm_bias_kernel<F: Float>(
     lines_per_row: u32,
     axis_size: u32,
     eps: f32,
+    use_fast_rsqrt: u32,
 ) {
     let row = CUBE_POS_X;
 
@@ -179,8 +204,7 @@ fn rms_norm_bias_kernel<F: Float>(
 
     let mut partial_sum = 0.0f32;
     let mut local_count = 0u32;
-    let mut shared_partials = SharedMemory::<f32>::new(MAX_SUBGROUPS_PER_ROW);
-    let mut shared_inv = SharedMemory::<f32>::new(1u32);
+    let allow_native_rsqrt = use_fast_rsqrt != 0;
 
     if is_active_lane {
         let mut line_index = thread_linear;
@@ -205,14 +229,22 @@ fn rms_norm_bias_kernel<F: Float>(
         }
     }
 
-    let subgroup_sum = reduce_sum_with_shuffle(partial_sum, subgroup_size);
+    let subgroup_sum = reduce_sum_with_shuffle(partial_sum, subgroup_size, lane_id);
+    let axis = axis_size as f32;
 
-    if is_active_lane && lane_id == 0 {
-        shared_partials[subgroup_id] = subgroup_sum;
-    }
-    sync_cube();
+    let inv_rms = if subgroups_per_row == 1u32 {
+        let mut inv = 0.0f32;
+        if lane_id == 0 {
+            inv = compute_inv_rms(subgroup_sum, axis, eps, allow_native_rsqrt);
+        }
+        plane_broadcast(inv, 0)
+    } else {
+        let mut shared_partials = SharedMemory::<f32>::new(MAX_SUBGROUPS_PER_ROW);
+        if is_active_lane && lane_id == 0 {
+            shared_partials[subgroup_id] = subgroup_sum;
+        }
+        sync_cube();
 
-    if subgroups_per_row > 1u32 {
         if subgroup_id == 0 {
             let mut accumulator = 0.0f32;
             let mut idx = lane_id;
@@ -220,26 +252,22 @@ fn rms_norm_bias_kernel<F: Float>(
                 accumulator += shared_partials[idx];
                 idx += subgroup_size;
             }
-            let reduced = reduce_sum_with_shuffle(accumulator, subgroup_size);
+            let reduced = reduce_sum_with_shuffle(accumulator, subgroup_size, lane_id);
             if lane_id == 0 {
                 shared_partials[0] = reduced;
             }
         }
         sync_cube();
-    }
 
-    let total_sum = shared_partials[0];
+        let total_sum = shared_partials[0];
+        let mut shared_inv = SharedMemory::<f32>::new(1u32);
+        if subgroup_id == 0 && lane_id == 0 {
+            shared_inv[0] = compute_inv_rms(total_sum, axis, eps, allow_native_rsqrt);
+        }
+        sync_cube();
+        shared_inv[0]
+    };
 
-    if subgroup_id == 0 && lane_id == 0 {
-        let axis = axis_size as f32;
-        let mean = total_sum / axis;
-        let denom = mean + eps;
-        let inv = Recip::recip(Sqrt::sqrt(denom));
-        shared_inv[0] = inv;
-    }
-    sync_cube();
-
-    let inv_rms = shared_inv[0];
     if is_active_lane {
         let mut iteration = 0u32;
         while iteration < local_count {
@@ -413,33 +441,39 @@ pub fn launch_ref<R: Runtime, F: Float>(
 
     let props = client.properties();
     let subgroup_size = cmp::max(props.hardware.plane_size_min, 1);
-    let max_threads = cmp::max(props.hardware.max_cube_dim.x, subgroup_size);
-    let required_threads = (lines_per_row + MAX_LINES_PER_THREAD - 1) / MAX_LINES_PER_THREAD;
-    let target = cmp::max(required_threads, 1);
-    let mut threads_per_row = ((target + subgroup_size - 1) / subgroup_size) * subgroup_size;
-    threads_per_row = cmp::max(threads_per_row, subgroup_size);
-    let max_subgroup_threads = subgroup_size.saturating_mul(MAX_SUBGROUPS_PER_ROW);
-    threads_per_row = cmp::min(threads_per_row, max_threads);
-    threads_per_row = cmp::min(
-        threads_per_row,
-        cmp::max(max_subgroup_threads, subgroup_size),
+    let max_threads_axis = cmp::max(
+        subgroup_size,
+        cmp::min(
+            props.hardware.max_cube_dim.x,
+            props.hardware.max_units_per_cube,
+        ),
     );
-    if threads_per_row % subgroup_size != 0 {
-        let rounded_groups = cmp::max(threads_per_row / subgroup_size, 1);
-        threads_per_row = rounded_groups * subgroup_size;
+    let mut max_subgroups_hw = max_threads_axis / subgroup_size;
+    if max_subgroups_hw == 0 {
+        max_subgroups_hw = 1;
     }
-    threads_per_row = cmp::max(threads_per_row, subgroup_size);
-    let subgroups_per_row = threads_per_row / subgroup_size;
+    max_subgroups_hw = cmp::min(max_subgroups_hw, MAX_SUBGROUPS_PER_ROW);
+
+    let mut subgroups_per_row = ((lines_per_row + LINES_PER_LANE_TARGET - 1)
+        / LINES_PER_LANE_TARGET)
+        .clamp(1, max_subgroups_hw);
+    let mut threads_per_row = subgroups_per_row * subgroup_size;
+    let mut per_thread_lines = (lines_per_row + threads_per_row - 1) / threads_per_row;
+
+    while per_thread_lines > MAX_LINES_PER_THREAD && subgroups_per_row < max_subgroups_hw {
+        subgroups_per_row += 1;
+        threads_per_row = subgroups_per_row * subgroup_size;
+        per_thread_lines = (lines_per_row + threads_per_row - 1) / threads_per_row;
+    }
+
     assert!(
         subgroups_per_row > 0,
-        "Invalid launch configuration: zero subgroups"
+        "Invalid launch configuration: zero subgroups",
     );
-    let per_thread_lines = (lines_per_row + threads_per_row - 1) / threads_per_row;
     assert!(
         per_thread_lines <= MAX_LINES_PER_THREAD,
-        "RMSNorm configuration exceeds register allocation per lane"
+        "RMSNorm configuration exceeds register allocation per lane",
     );
-
     let cube_dim = CubeDim::new_1d(threads_per_row);
     let cube_count = CubeCount::new_1d(num_rows_u32);
 
@@ -447,6 +481,10 @@ pub fn launch_ref<R: Runtime, F: Float>(
     let lines_per_row_arg = ScalarArg::new(lines_per_row);
     let axis_size_arg = ScalarArg::new(axis_size_u32);
     let eps_arg = ScalarArg::new(epsilon);
+    let allow_native_rsqrt =
+        props.features.plane.contains(Plane::Ops) && props.hardware.plane_size_min > 1;
+    let use_fast_rsqrt = allow_native_rsqrt && TypeId::of::<F>() == TypeId::of::<f32>();
+    let use_fast_rsqrt_arg = ScalarArg::new(if use_fast_rsqrt { 1u32 } else { 0u32 });
 
     unsafe {
         let input_arg =
@@ -484,6 +522,7 @@ pub fn launch_ref<R: Runtime, F: Float>(
                 lines_per_row_arg,
                 axis_size_arg,
                 eps_arg,
+                use_fast_rsqrt_arg,
             );
         } else {
             rms_norm_kernel::launch_unchecked::<F, R>(
@@ -497,6 +536,7 @@ pub fn launch_ref<R: Runtime, F: Float>(
                 lines_per_row_arg,
                 axis_size_arg,
                 eps_arg,
+                use_fast_rsqrt_arg,
             );
         }
     }

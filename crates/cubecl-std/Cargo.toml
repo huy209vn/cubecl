@@ -30,3 +30,12 @@ variadics_please = { workspace = true }
 # no_std compat
 foldhash = { workspace = true }
 spin = { workspace = true }
+
+[dev-dependencies]
+bytemuck.workspace = true
+cubecl-cpu = { path = "../cubecl-cpu", version = "0.7.0", default-features = false }
+criterion = "0.5"
+
+[[bench]]
+name = "rms_norm"
+harness = false

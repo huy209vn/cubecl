@@ -15,8 +15,18 @@ use cubecl_runtime::features::Plane;
 use super::TensorHandle;
 
 const MAX_LINES_PER_THREAD: u32 = 64;
+const MAX_VECTOR_ELEMENTS_PER_THREAD: u32 = 1024;
 const MAX_SUBGROUPS_PER_ROW: u32 = 32;
 const LINES_PER_LANE_TARGET: u32 = 4;
+
+#[inline(always)]
+fn max_cached_lines_per_thread(line_size: u32) -> u32 {
+    if line_size == 0 {
+        return 1;
+    }
+    let element_bound = cmp::max(1, MAX_VECTOR_ELEMENTS_PER_THREAD / line_size);
+    cmp::max(1, cmp::min(MAX_LINES_PER_THREAD, element_bound))
+}
 
 #[cube]
 fn reduce_sum_with_shuffle(value: f32, subgroup_size: u32, lane_id: u32) -> f32 {
@@ -104,6 +114,7 @@ fn rms_norm_kernel<F: Float>(
             }
 
             local_count += 1;
+            debug_assert!(local_count <= MAX_LINES_PER_THREAD);
             line_index += active_threads;
         }
     }
@@ -225,6 +236,7 @@ fn rms_norm_bias_kernel<F: Float>(
             }
 
             local_count += 1;
+            debug_assert!(local_count <= MAX_LINES_PER_THREAD);
             line_index += active_threads;
         }
     }
@@ -427,6 +439,7 @@ pub fn launch_ref<R: Runtime, F: Float>(
     }
 
     let line_size = vectorization as u32;
+    let max_cached_lines = max_cached_lines_per_thread(line_size);
     let axis_size_u32 = u32::try_from(axis_size).expect("Axis size exceeds u32 range");
     assert_eq!(
         axis_size_u32 % line_size,
@@ -460,7 +473,7 @@ pub fn launch_ref<R: Runtime, F: Float>(
     let mut threads_per_row = subgroups_per_row * subgroup_size;
     let mut per_thread_lines = (lines_per_row + threads_per_row - 1) / threads_per_row;
 
-    while per_thread_lines > MAX_LINES_PER_THREAD && subgroups_per_row < max_subgroups_hw {
+    while per_thread_lines > max_cached_lines && subgroups_per_row < max_subgroups_hw {
         subgroups_per_row += 1;
         threads_per_row = subgroups_per_row * subgroup_size;
         per_thread_lines = (lines_per_row + threads_per_row - 1) / threads_per_row;
@@ -471,7 +484,7 @@ pub fn launch_ref<R: Runtime, F: Float>(
         "Invalid launch configuration: zero subgroups",
     );
     assert!(
-        per_thread_lines <= MAX_LINES_PER_THREAD,
+        per_thread_lines <= max_cached_lines,
         "RMSNorm configuration exceeds register allocation per lane",
     );
     let cube_dim = CubeDim::new_1d(threads_per_row);

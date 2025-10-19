@@ -6,6 +6,7 @@ pub mod rms_norm;
 
 pub use contiguous::*;
 pub use handle::*;
+pub use matrix_batch_layout::{MatrixBatchLayout, matrix_batch_layout};
 pub use view::*;
 
 pub mod layout;

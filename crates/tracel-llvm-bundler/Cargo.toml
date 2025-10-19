@@ -1,0 +1,13 @@
+[package]
+name = "tracel-llvm-bundler"
+version = "20.1.4-5"
+edition = "2021"
+description = "Stubbed tracel-llvm-bundler for offline builds"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []

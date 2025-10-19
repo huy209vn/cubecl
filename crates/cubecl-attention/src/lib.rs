@@ -1,3 +1,4 @@
+#![allow(unknown_lints)]
 #![allow(clippy::explicit_counter_loop)]
 #![allow(clippy::manual_is_multiple_of)]
 

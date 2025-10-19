@@ -125,5 +125,10 @@ cubecl-reduce = { path = "../cubecl-reduce", version = "0.7.0", features = [
 cubecl-std = { path = "../cubecl-std", version = "0.7.0", features = [
     "export_tests",
 ] }
+criterion = "0.5"
 paste = { workspace = true }
 pretty_assertions = { workspace = true }
+
+[[bench]]
+name = "rms_norm"
+harness = false

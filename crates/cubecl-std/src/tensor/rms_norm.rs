@@ -19,13 +19,23 @@ const MAX_VECTOR_ELEMENTS_PER_THREAD: u32 = 1024;
 const MAX_SUBGROUPS_PER_ROW: u32 = 32;
 const LINES_PER_LANE_TARGET: u32 = 4;
 
-#[inline(always)]
-fn max_cached_lines_per_thread(line_size: u32) -> u32 {
+const fn max_cached_lines_per_thread_for_line_size(line_size: u32) -> u32 {
     if line_size == 0 {
         return 1;
     }
-    let element_bound = cmp::max(1, MAX_VECTOR_ELEMENTS_PER_THREAD / line_size);
-    cmp::max(1, cmp::min(MAX_LINES_PER_THREAD, element_bound))
+    let element_bound = MAX_VECTOR_ELEMENTS_PER_THREAD / line_size;
+    let element_bound = if element_bound == 0 { 1 } else { element_bound };
+    let capped = if MAX_LINES_PER_THREAD < element_bound {
+        MAX_LINES_PER_THREAD
+    } else {
+        element_bound
+    };
+    if capped == 0 { 1 } else { capped }
+}
+
+#[inline(always)]
+fn max_cached_lines_per_thread(line_size: u32) -> u32 {
+    max_cached_lines_per_thread_for_line_size(line_size)
 }
 
 #[cube]
@@ -55,12 +65,17 @@ fn reduce_sum_with_shuffle(value: f32, subgroup_size: u32, lane_id: u32) -> f32 
     }
 }
 
+#[cube(fast_math = FastMath::AllowReciprocal)]
+fn fast_inverse_sqrt(value: f32) -> f32 {
+    Recip::recip(Sqrt::sqrt(value))
+}
+
 #[cube]
 fn compute_inv_rms(total_sum: f32, axis_size: f32, eps: f32, allow_native_rsqrt: bool) -> f32 {
     let mean = total_sum / axis_size;
     let denom = mean + eps;
     if allow_native_rsqrt {
-        Recip::recip(Sqrt::sqrt(denom))
+        fast_inverse_sqrt(denom)
     } else {
         1.0f32 / Sqrt::sqrt(denom)
     }
@@ -114,7 +129,9 @@ fn rms_norm_kernel<F: Float>(
             }
 
             local_count += 1;
-            debug_assert!(local_count <= MAX_LINES_PER_THREAD);
+            if local_count > MAX_LINES_PER_THREAD {
+                terminate!();
+            }
             line_index += active_threads;
         }
     }
@@ -236,7 +253,9 @@ fn rms_norm_bias_kernel<F: Float>(
             }
 
             local_count += 1;
-            debug_assert!(local_count <= MAX_LINES_PER_THREAD);
+            if local_count > MAX_LINES_PER_THREAD {
+                terminate!();
+            }
             line_index += active_threads;
         }
     }
@@ -467,16 +486,16 @@ pub fn launch_ref<R: Runtime, F: Float>(
     }
     max_subgroups_hw = cmp::min(max_subgroups_hw, MAX_SUBGROUPS_PER_ROW);
 
-    let mut subgroups_per_row = ((lines_per_row + LINES_PER_LANE_TARGET - 1)
-        / LINES_PER_LANE_TARGET)
+    let mut subgroups_per_row = lines_per_row
+        .div_ceil(LINES_PER_LANE_TARGET)
         .clamp(1, max_subgroups_hw);
     let mut threads_per_row = subgroups_per_row * subgroup_size;
-    let mut per_thread_lines = (lines_per_row + threads_per_row - 1) / threads_per_row;
+    let mut per_thread_lines = lines_per_row.div_ceil(threads_per_row);
 
     while per_thread_lines > max_cached_lines && subgroups_per_row < max_subgroups_hw {
         subgroups_per_row += 1;
         threads_per_row = subgroups_per_row * subgroup_size;
-        per_thread_lines = (lines_per_row + threads_per_row - 1) / threads_per_row;
+        per_thread_lines = lines_per_row.div_ceil(threads_per_row);
     }
 
     assert!(

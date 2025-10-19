@@ -18,6 +18,7 @@ const MAX_LINES_PER_THREAD: u32 = 64;
 const MAX_VECTOR_ELEMENTS_PER_THREAD: u32 = 1024;
 const MAX_SUBGROUPS_PER_ROW: u32 = 32;
 const LINES_PER_LANE_TARGET: u32 = 4;
+const DEBUG_ASSERTIONS_ENABLED: bool = cfg!(debug_assertions);
 
 const fn max_cached_lines_per_thread_for_line_size(line_size: u32) -> u32 {
     if line_size == 0 {
@@ -115,6 +116,12 @@ fn rms_norm_kernel<F: Float>(
     if is_active_lane {
         let mut line_index = thread_linear;
         while line_index < lines_per_row {
+            if DEBUG_ASSERTIONS_ENABLED {
+                let _ = MAX_LINES_PER_THREAD - local_count - 1;
+            }
+            if local_count >= MAX_LINES_PER_THREAD {
+                break;
+            }
             let global_index = row_start + line_index;
             let values = input[global_index];
             let gamma = weight[line_index];
@@ -129,10 +136,6 @@ fn rms_norm_kernel<F: Float>(
             }
 
             local_count += 1;
-            #[cfg(debug_assertions)]
-            if local_count > MAX_LINES_PER_THREAD {
-                terminate!();
-            }
             line_index += active_threads;
         }
     }
@@ -238,6 +241,12 @@ fn rms_norm_bias_kernel<F: Float>(
     if is_active_lane {
         let mut line_index = thread_linear;
         while line_index < lines_per_row {
+            if DEBUG_ASSERTIONS_ENABLED {
+                let _ = MAX_LINES_PER_THREAD - local_count - 1;
+            }
+            if local_count >= MAX_LINES_PER_THREAD {
+                break;
+            }
             let global_index = row_start + line_index;
             let values = input[global_index];
             let gamma = weight[line_index];
@@ -254,10 +263,6 @@ fn rms_norm_bias_kernel<F: Float>(
             }
 
             local_count += 1;
-            #[cfg(debug_assertions)]
-            if local_count > MAX_LINES_PER_THREAD {
-                terminate!();
-            }
             line_index += active_threads;
         }
     }

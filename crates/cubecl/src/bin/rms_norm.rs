@@ -1,4 +1,4 @@
-#[path = "../../benches/rms_norm_impl.rs"]
+#[path = "../../benches/rms_norm.rs"]
 mod rms_norm_impl;
 
 fn main() {

@@ -30,6 +30,3 @@ variadics_please = { workspace = true }
 # no_std compat
 foldhash = { workspace = true }
 spin = { workspace = true }
-
-[dev-dependencies]
-# Intentionally left empty; GPU benches live alongside their runtime-specific crates.

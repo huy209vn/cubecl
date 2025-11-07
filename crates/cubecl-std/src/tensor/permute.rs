@@ -31,7 +31,6 @@ use super::TensorHandle;
 use cubecl::frontend::TensorHandleRef;
 use cubecl::prelude::*;
 use cubecl_core as cubecl;
-use cubecl_core::tensor_line_size_parallel;
 use std::collections::HashSet;
 use std::env;
 use std::sync::{LazyLock, Mutex};
@@ -46,10 +45,6 @@ const TILE_SIZE_MOV4: u32 = 32;
 const TILE_SIZE_MOV2: u32 = 64;
 /// Number of threads per tile column for cooperative loading
 const BLOCK_ROWS: u32 = 8;
-/// Maximum elements per thread to avoid register pressure
-const MAX_LINES_PER_THREAD: u32 = 4;
-/// Default threads per block for generic permute kernel
-const THREADS_PER_BLOCK: u32 = 256;
 
 // ===========================================================
 // SECTION I — Utility / shape & stride helpers (host-side)
@@ -96,8 +91,6 @@ fn infer_batch_transpose_shape(input_shape: &[usize], _axes: &[usize]) -> (u32, 
 struct FoldedPermutation {
     /// Folded shape (lower rank, merged contiguous dims)
     folded_shape: Vec<usize>,
-    /// Folded strides
-    folded_strides: Vec<usize>,
     /// Permutation in terms of folded dimensions
     folded_axes: Vec<usize>,
     /// Whether folding simplified the problem
@@ -129,7 +122,6 @@ fn fold_contiguous_dimensions(
     if rank <= 1 {
         return FoldedPermutation {
             folded_shape: input_shape.to_vec(),
-            folded_strides: input_strides.to_vec(),
             folded_axes: axes.to_vec(),
             was_simplified: false,
         };
@@ -144,7 +136,6 @@ fn fold_contiguous_dimensions(
 
     // Build folded dimensions by merging contiguous runs
     let mut folded_shape = Vec::new();
-    let mut folded_strides = Vec::new();
     let mut old_to_new_axis = vec![0usize; rank]; // Maps old axis index to folded axis index
 
     let mut i = 0;
@@ -159,12 +150,11 @@ fn fold_contiguous_dimensions(
         // Merge dimensions [start..=i]
         let merged_size: usize = (start..=i).map(|j| input_shape[j]).product();
         folded_shape.push(merged_size);
-        folded_strides.push(input_strides[start]); // Stride of the outermost dimension in the run
 
         // All axes in this run map to the same folded axis
         let folded_idx = folded_shape.len() - 1;
-        for j in start..=i {
-            old_to_new_axis[j] = folded_idx;
+        for item in old_to_new_axis.iter_mut().take(i + 1).skip(start) {
+            *item = folded_idx;
         }
 
         i += 1;
@@ -228,7 +218,6 @@ fn fold_contiguous_dimensions(
         // Folding would break correctness, return original
         return FoldedPermutation {
             folded_shape: input_shape.to_vec(),
-            folded_strides: input_strides.to_vec(),
             folded_axes: axes.to_vec(),
             was_simplified: false,
         };
@@ -251,7 +240,6 @@ fn fold_contiguous_dimensions(
 
     FoldedPermutation {
         folded_shape,
-        folded_strides,
         folded_axes,
         was_simplified,
     }
@@ -663,8 +651,8 @@ fn tile_transpose_2d_kernel<F: Float>(
     let block_idx = CUBE_POS;
 
     // Compute number of tiles
-    let num_tile_rows = (rows + tile_size - 1) / tile_size;
-    let num_tile_cols = (cols + tile_size - 1) / tile_size;
+    let _num_tile_rows = rows.div_ceil(tile_size);
+    let num_tile_cols = cols.div_ceil(tile_size);
 
     // Decompose block index into (tile_row, tile_col)
     let tile_row_idx = block_idx / num_tile_cols;
@@ -736,8 +724,8 @@ fn batch_transpose_kernel<F: Float>(
     let block_idx = CUBE_POS;
 
     // Compute number of tiles
-    let num_tile_rows = (rows + tile_size - 1) / tile_size;
-    let num_tile_cols = (cols + tile_size - 1) / tile_size;
+    let num_tile_rows = rows.div_ceil(tile_size);
+    let num_tile_cols = cols.div_ceil(tile_size);
     let tiles_per_batch = num_tile_rows * num_tile_cols;
 
     // Decompose block index into (batch, tile_row, tile_col)
@@ -821,13 +809,13 @@ fn transpose_2d_movement2_kernel<F: Float>(
     rows: u32,
     cols: u32,
     #[comptime] tile_size: u32,
-    #[comptime] movement_size: u32,
+    #[comptime] _movement_size: u32,
 ) {
     let block_idx = CUBE_POS;
 
     // Dimensions are in ORIGINAL space, but tensor accesses are automatically vectorized
-    let num_tile_rows = (rows + tile_size - 1) / tile_size;
-    let num_tile_cols = (cols + tile_size - 1) / tile_size;
+    let _num_tile_rows = rows.div_ceil(tile_size);
+    let num_tile_cols = cols.div_ceil(tile_size);
 
     let tile_row_idx = block_idx / num_tile_cols;
     let tile_col_idx = block_idx % num_tile_cols;
@@ -893,13 +881,13 @@ fn batch_transpose_movement2_kernel<F: Float>(
     rows: u32,
     cols: u32,
     #[comptime] tile_size: u32,
-    #[comptime] movement_size: u32,
+    #[comptime] _movement_size: u32,
 ) {
     let block_idx = CUBE_POS;
 
     // Dimensions are in ORIGINAL space, tensor accesses are automatically vectorized
-    let num_tile_rows = (rows + tile_size - 1) / tile_size;
-    let num_tile_cols = (cols + tile_size - 1) / tile_size;
+    let num_tile_rows = rows.div_ceil(tile_size);
+    let num_tile_cols = cols.div_ceil(tile_size);
     let tiles_per_batch = num_tile_rows * num_tile_cols;
 
     let batch_idx = block_idx / tiles_per_batch;
@@ -1021,7 +1009,7 @@ fn launch_permute_kernel<R: Runtime, F: Float>(
         } else {
             // Use generic kernel for all other permutations (ranks 2-6, any axes)
             // Pad axes with zeros if rank < 6
-            let axes_0 = axes.get(0).copied().unwrap_or(0) as u32;
+            let axes_0 = axes.first().copied().unwrap_or(0) as u32;
             let axes_1 = axes.get(1).copied().unwrap_or(0) as u32;
             let axes_2 = axes.get(2).copied().unwrap_or(0) as u32;
             let axes_3 = axes.get(3).copied().unwrap_or(0) as u32;
@@ -1098,7 +1086,8 @@ fn should_use_vectorized_transpose(num_batches: u32, rows: u32, cols: u32) -> bo
 
     if force_vectorized {
         // Check alignment: prefer mov4 (4-element), accept mov2 (2-element)
-        let has_alignment = (rows % 4 == 0 && cols % 4 == 0) || (rows % 2 == 0 && cols % 2 == 0);
+        let has_alignment = (rows.is_multiple_of(4) && cols.is_multiple_of(4))
+            || (rows.is_multiple_of(2) && cols.is_multiple_of(2));
 
         // CRITICAL: Disable vectorization for small batches to preserve occupancy
         // When num_batches < 8, there aren't enough tiles to saturate the GPU,
@@ -1131,8 +1120,8 @@ fn launch_scalar_tile_transpose<R: Runtime, F: Float>(
     };
 
     // Compute tile grid dimensions
-    let num_tile_rows = (rows + tile_size - 1) / tile_size;
-    let num_tile_cols = (cols + tile_size - 1) / tile_size;
+    let num_tile_rows = rows.div_ceil(tile_size);
+    let num_tile_cols = cols.div_ceil(tile_size);
     let blocks_per_batch = num_tile_rows * num_tile_cols;
     let total_blocks = num_batches * blocks_per_batch;
 
@@ -1192,9 +1181,9 @@ fn launch_vectorized_tile_transpose<R: Runtime, F: Float>(
 ) {
     // Determine vectorization strategy
     // Try mov4 (4-element vectors) first, fall back to mov2 (2-element)
-    let (movement_size, tile_size) = if rows % 4 == 0 && cols % 4 == 0 {
+    let (movement_size, tile_size) = if rows.is_multiple_of(4) && cols.is_multiple_of(4) {
         (4, TILE_SIZE_MOV4) // 32×32 tiles, 4-element vectors
-    } else if rows % 2 == 0 && cols % 2 == 0 {
+    } else if rows.is_multiple_of(2) && cols.is_multiple_of(2) {
         (2, TILE_SIZE_MOV2) // 64×64 tiles, 2-element vectors
     } else {
         // Can't vectorize - fall back to scalar
@@ -1206,8 +1195,8 @@ fn launch_vectorized_tile_transpose<R: Runtime, F: Float>(
     // The kernel will see dimensions in "vectorized space" automatically.
 
     // Compute tile grid dimensions in ORIGINAL (non-vectorized) space
-    let num_tile_rows = (rows + tile_size - 1) / tile_size;
-    let num_tile_cols = (cols + tile_size - 1) / tile_size;
+    let num_tile_rows = rows.div_ceil(tile_size);
+    let num_tile_cols = cols.div_ceil(tile_size);
     let blocks_per_batch = num_tile_rows * num_tile_cols;
     let total_blocks = num_batches * blocks_per_batch;
 
@@ -1282,8 +1271,8 @@ fn launch_batch_transpose_kernel<R: Runtime, F: Float>(
     // Compute tile grid dimensions
     let vec_rows = if use_mov2 { rows / 2 } else { rows / 4 };
     let vec_cols = if use_mov2 { cols / 2 } else { cols / 4 };
-    let num_tile_rows = (vec_rows + tile_size - 1) / tile_size;
-    let num_tile_cols = (vec_cols + tile_size - 1) / tile_size;
+    let num_tile_rows = vec_rows.div_ceil(tile_size);
+    let num_tile_cols = vec_cols.div_ceil(tile_size);
     let blocks_per_batch = num_tile_rows * num_tile_cols;
     let total_blocks = num_batches * blocks_per_batch;
 
@@ -1358,7 +1347,7 @@ fn check_use_mov2(rows: u32, cols: u32) -> bool {
     // Use mov2 (2-element vectorized loads) when dimensions are even
     // This is a simple heuristic - full alignment checking would require
     // inspecting the memory handle, which is complex in CubeCL
-    rows % 2 == 0 && cols % 2 == 0
+    rows.is_multiple_of(2) && cols.is_multiple_of(2)
 }
 
 /// Wrapper: decide whether to use batch transpose path.
@@ -1473,7 +1462,6 @@ pub fn launch_ref<R: Runtime, F: Float>(
 /// Allocate output tensor and perform permutation.
 ///
 /// Convenience wrapper that handles output allocation.
-
 pub fn launch_alloc<R: Runtime, F: Float>(
     client: &ComputeClient<R::Server>,
     input: &TensorHandle<R, F>,

@@ -6,9 +6,7 @@ pub mod permute;
 
 pub use contiguous::*;
 pub use handle::*;
-pub use identity::*;
 pub use matrix_batch_layout::*;
-pub use permute::*;
 pub use view::*;
 
 pub mod layout;

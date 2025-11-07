@@ -27,17 +27,14 @@
 //! - NVIDIA Developer Blog: *“Efficient Matrix Transpose in CUDA C/C++”*
 //! - CubeCL RMSNorm kernels (for doc and performance layout style).
 
-
-
-
+use super::TensorHandle;
+use cubecl::frontend::TensorHandleRef;
+use cubecl::prelude::*;
+use cubecl_core as cubecl;
+use cubecl_core::tensor_line_size_parallel;
 use std::collections::HashSet;
 use std::env;
 use std::sync::{LazyLock, Mutex};
-use cubecl_core as cubecl;
-use cubecl::prelude::*;
-use cubecl_core::tensor_line_size_parallel;
-use super::TensorHandle;
-use cubecl::frontend::TensorHandleRef;
 
 // ================================
 // Constants & tuning parameters
@@ -69,7 +66,6 @@ fn infer_output_shape(input_shape: &[usize], axes: &[usize]) -> Vec<usize> {
     );
     axes.iter().map(|&a| input_shape[a]).collect()
 }
-
 
 /// Apply permutation mapping: given output coordinate and axes, compute input coordinate.
 /// Caller will use this to configure tile-based transpose kernels.
@@ -210,8 +206,14 @@ fn fold_contiguous_dimensions(
             // We need axes[positions[0]] < axes[positions[1]]
             if axes_respects_folding {
                 for j in 0..old_axes_in_group.len() - 1 {
-                    let pos_j = axes.iter().position(|&a| a == old_axes_in_group[j]).unwrap();
-                    let pos_jp1 = axes.iter().position(|&a| a == old_axes_in_group[j + 1]).unwrap();
+                    let pos_j = axes
+                        .iter()
+                        .position(|&a| a == old_axes_in_group[j])
+                        .unwrap();
+                    let pos_jp1 = axes
+                        .iter()
+                        .position(|&a| a == old_axes_in_group[j + 1])
+                        .unwrap();
                     if pos_j > pos_jp1 {
                         // Axes are reversed or out of order - can't fold
                         axes_respects_folding = false;
@@ -261,10 +263,7 @@ fn fold_contiguous_dimensions(
 
 /// 2D transpose: [H, W] → [W, H] with axes [1, 0]
 #[cube(launch_unchecked)]
-fn permute_kernel_2d_transpose<F: Float>(
-    input: &Tensor<Line<F>>,
-    output: &mut Tensor<Line<F>>,
-) {
+fn permute_kernel_2d_transpose<F: Float>(input: &Tensor<Line<F>>, output: &mut Tensor<Line<F>>) {
     let i = ABSOLUTE_POS;
 
     let h = output.shape(0);
@@ -288,10 +287,7 @@ fn permute_kernel_2d_transpose<F: Float>(
 
 /// 3D batch transpose: [B, H, W] → [B, W, H] with axes [0, 2, 1]
 #[cube(launch_unchecked)]
-fn permute_kernel_3d_021<F: Float>(
-    input: &Tensor<Line<F>>,
-    output: &mut Tensor<Line<F>>,
-) {
+fn permute_kernel_3d_021<F: Float>(input: &Tensor<Line<F>>, output: &mut Tensor<Line<F>>) {
     let i = ABSOLUTE_POS;
 
     let b = output.shape(0);
@@ -311,22 +307,17 @@ fn permute_kernel_3d_021<F: Float>(
         let in_row = out_col;
         let in_col = out_row;
 
-        let in_offset = in_batch * input.stride(0)
-                      + in_row * input.stride(1)
-                      + in_col * input.stride(2);
-        let out_offset = out_batch * output.stride(0)
-                       + out_row * output.stride(1)
-                       + out_col * output.stride(2);
+        let in_offset =
+            in_batch * input.stride(0) + in_row * input.stride(1) + in_col * input.stride(2);
+        let out_offset =
+            out_batch * output.stride(0) + out_row * output.stride(1) + out_col * output.stride(2);
         output[out_offset] = input[in_offset];
     }
 }
 
 /// 3D permutation: [B, H, W] → [W, B, H] with axes [2, 0, 1]
 #[cube(launch_unchecked)]
-fn permute_kernel_3d_201<F: Float>(
-    input: &Tensor<Line<F>>,
-    output: &mut Tensor<Line<F>>,
-) {
+fn permute_kernel_3d_201<F: Float>(input: &Tensor<Line<F>>, output: &mut Tensor<Line<F>>) {
     let i = ABSOLUTE_POS;
 
     let b = output.shape(0);
@@ -345,16 +336,13 @@ fn permute_kernel_3d_201<F: Float>(
         // So: in[0] = out[axes.index_of(0)] = out[1]
         //     in[1] = out[axes.index_of(1)] = out[2]
         //     in[2] = out[axes.index_of(2)] = out[0]
-        let in_d0 = out_d1;  // input dim 0 ← output dim 1
-        let in_d1 = out_d2;  // input dim 1 ← output dim 2
-        let in_d2 = out_d0;  // input dim 2 ← output dim 0
+        let in_d0 = out_d1; // input dim 0 ← output dim 1
+        let in_d1 = out_d2; // input dim 1 ← output dim 2
+        let in_d2 = out_d0; // input dim 2 ← output dim 0
 
-        let in_offset = in_d0 * input.stride(0)
-                      + in_d1 * input.stride(1)
-                      + in_d2 * input.stride(2);
-        let out_offset = out_d0 * output.stride(0)
-                       + out_d1 * output.stride(1)
-                       + out_d2 * output.stride(2);
+        let in_offset = in_d0 * input.stride(0) + in_d1 * input.stride(1) + in_d2 * input.stride(2);
+        let out_offset =
+            out_d0 * output.stride(0) + out_d1 * output.stride(1) + out_d2 * output.stride(2);
         output[out_offset] = input[in_offset];
     }
 }
@@ -382,8 +370,17 @@ fn permute_kernel_generic<F: Float>(
         2 => output.shape(0) * output.shape(1),
         3 => output.shape(0) * output.shape(1) * output.shape(2),
         4 => output.shape(0) * output.shape(1) * output.shape(2) * output.shape(3),
-        5 => output.shape(0) * output.shape(1) * output.shape(2) * output.shape(3) * output.shape(4),
-        6 => output.shape(0) * output.shape(1) * output.shape(2) * output.shape(3) * output.shape(4) * output.shape(5),
+        5 => {
+            output.shape(0) * output.shape(1) * output.shape(2) * output.shape(3) * output.shape(4)
+        }
+        6 => {
+            output.shape(0)
+                * output.shape(1)
+                * output.shape(2)
+                * output.shape(3)
+                * output.shape(4)
+                * output.shape(5)
+        }
         _ => 0,
     };
 
@@ -396,20 +393,36 @@ fn permute_kernel_generic<F: Float>(
 
         let in_offset = in_0 * input.stride(0) + in_1 * input.stride(1);
         output[i] = input[in_offset];
-
     } else if i < count && rank == 3 {
         let shape_12 = output.shape(1) * output.shape(2);
         let out_0 = i / shape_12;
         let out_1 = (i % shape_12) / output.shape(2);
         let out_2 = i % output.shape(2);
 
-        let in_0 = if axes_0 == 0 { out_0 } else if axes_0 == 1 { out_1 } else { out_2 };
-        let in_1 = if axes_1 == 0 { out_0 } else if axes_1 == 1 { out_1 } else { out_2 };
-        let in_2 = if axes_2 == 0 { out_0 } else if axes_2 == 1 { out_1 } else { out_2 };
+        let in_0 = if axes_0 == 0 {
+            out_0
+        } else if axes_0 == 1 {
+            out_1
+        } else {
+            out_2
+        };
+        let in_1 = if axes_1 == 0 {
+            out_0
+        } else if axes_1 == 1 {
+            out_1
+        } else {
+            out_2
+        };
+        let in_2 = if axes_2 == 0 {
+            out_0
+        } else if axes_2 == 1 {
+            out_1
+        } else {
+            out_2
+        };
 
         let in_offset = in_0 * input.stride(0) + in_1 * input.stride(1) + in_2 * input.stride(2);
         output[i] = input[in_offset];
-
     } else if i < count && rank == 4 {
         let shape_123 = output.shape(1) * output.shape(2) * output.shape(3);
         let shape_23 = output.shape(2) * output.shape(3);
@@ -418,14 +431,48 @@ fn permute_kernel_generic<F: Float>(
         let out_2 = (i % shape_23) / output.shape(3);
         let out_3 = i % output.shape(3);
 
-        let in_0 = if axes_0 == 0 { out_0 } else if axes_0 == 1 { out_1 } else if axes_0 == 2 { out_2 } else { out_3 };
-        let in_1 = if axes_1 == 0 { out_0 } else if axes_1 == 1 { out_1 } else if axes_1 == 2 { out_2 } else { out_3 };
-        let in_2 = if axes_2 == 0 { out_0 } else if axes_2 == 1 { out_1 } else if axes_2 == 2 { out_2 } else { out_3 };
-        let in_3 = if axes_3 == 0 { out_0 } else if axes_3 == 1 { out_1 } else if axes_3 == 2 { out_2 } else { out_3 };
+        let in_0 = if axes_0 == 0 {
+            out_0
+        } else if axes_0 == 1 {
+            out_1
+        } else if axes_0 == 2 {
+            out_2
+        } else {
+            out_3
+        };
+        let in_1 = if axes_1 == 0 {
+            out_0
+        } else if axes_1 == 1 {
+            out_1
+        } else if axes_1 == 2 {
+            out_2
+        } else {
+            out_3
+        };
+        let in_2 = if axes_2 == 0 {
+            out_0
+        } else if axes_2 == 1 {
+            out_1
+        } else if axes_2 == 2 {
+            out_2
+        } else {
+            out_3
+        };
+        let in_3 = if axes_3 == 0 {
+            out_0
+        } else if axes_3 == 1 {
+            out_1
+        } else if axes_3 == 2 {
+            out_2
+        } else {
+            out_3
+        };
 
-        let in_offset = in_0 * input.stride(0) + in_1 * input.stride(1) + in_2 * input.stride(2) + in_3 * input.stride(3);
+        let in_offset = in_0 * input.stride(0)
+            + in_1 * input.stride(1)
+            + in_2 * input.stride(2)
+            + in_3 * input.stride(3);
         output[i] = input[in_offset];
-
     } else if i < count && rank == 5 {
         let shape_1234 = output.shape(1) * output.shape(2) * output.shape(3) * output.shape(4);
         let shape_234 = output.shape(2) * output.shape(3) * output.shape(4);
@@ -436,17 +483,71 @@ fn permute_kernel_generic<F: Float>(
         let out_3 = (i % shape_34) / output.shape(4);
         let out_4 = i % output.shape(4);
 
-        let in_0 = if axes_0 == 0 { out_0 } else if axes_0 == 1 { out_1 } else if axes_0 == 2 { out_2 } else if axes_0 == 3 { out_3 } else { out_4 };
-        let in_1 = if axes_1 == 0 { out_0 } else if axes_1 == 1 { out_1 } else if axes_1 == 2 { out_2 } else if axes_1 == 3 { out_3 } else { out_4 };
-        let in_2 = if axes_2 == 0 { out_0 } else if axes_2 == 1 { out_1 } else if axes_2 == 2 { out_2 } else if axes_2 == 3 { out_3 } else { out_4 };
-        let in_3 = if axes_3 == 0 { out_0 } else if axes_3 == 1 { out_1 } else if axes_3 == 2 { out_2 } else if axes_3 == 3 { out_3 } else { out_4 };
-        let in_4 = if axes_4 == 0 { out_0 } else if axes_4 == 1 { out_1 } else if axes_4 == 2 { out_2 } else if axes_4 == 3 { out_3 } else { out_4 };
+        let in_0 = if axes_0 == 0 {
+            out_0
+        } else if axes_0 == 1 {
+            out_1
+        } else if axes_0 == 2 {
+            out_2
+        } else if axes_0 == 3 {
+            out_3
+        } else {
+            out_4
+        };
+        let in_1 = if axes_1 == 0 {
+            out_0
+        } else if axes_1 == 1 {
+            out_1
+        } else if axes_1 == 2 {
+            out_2
+        } else if axes_1 == 3 {
+            out_3
+        } else {
+            out_4
+        };
+        let in_2 = if axes_2 == 0 {
+            out_0
+        } else if axes_2 == 1 {
+            out_1
+        } else if axes_2 == 2 {
+            out_2
+        } else if axes_2 == 3 {
+            out_3
+        } else {
+            out_4
+        };
+        let in_3 = if axes_3 == 0 {
+            out_0
+        } else if axes_3 == 1 {
+            out_1
+        } else if axes_3 == 2 {
+            out_2
+        } else if axes_3 == 3 {
+            out_3
+        } else {
+            out_4
+        };
+        let in_4 = if axes_4 == 0 {
+            out_0
+        } else if axes_4 == 1 {
+            out_1
+        } else if axes_4 == 2 {
+            out_2
+        } else if axes_4 == 3 {
+            out_3
+        } else {
+            out_4
+        };
 
-        let in_offset = in_0 * input.stride(0) + in_1 * input.stride(1) + in_2 * input.stride(2) + in_3 * input.stride(3) + in_4 * input.stride(4);
+        let in_offset = in_0 * input.stride(0)
+            + in_1 * input.stride(1)
+            + in_2 * input.stride(2)
+            + in_3 * input.stride(3)
+            + in_4 * input.stride(4);
         output[i] = input[in_offset];
-
     } else if i < count && rank == 6 {
-        let shape_12345 = output.shape(1) * output.shape(2) * output.shape(3) * output.shape(4) * output.shape(5);
+        let shape_12345 =
+            output.shape(1) * output.shape(2) * output.shape(3) * output.shape(4) * output.shape(5);
         let shape_2345 = output.shape(2) * output.shape(3) * output.shape(4) * output.shape(5);
         let shape_345 = output.shape(3) * output.shape(4) * output.shape(5);
         let shape_45 = output.shape(4) * output.shape(5);
@@ -457,14 +558,91 @@ fn permute_kernel_generic<F: Float>(
         let out_4 = (i % shape_45) / output.shape(5);
         let out_5 = i % output.shape(5);
 
-        let in_0 = if axes_0 == 0 { out_0 } else if axes_0 == 1 { out_1 } else if axes_0 == 2 { out_2 } else if axes_0 == 3 { out_3 } else if axes_0 == 4 { out_4 } else { out_5 };
-        let in_1 = if axes_1 == 0 { out_0 } else if axes_1 == 1 { out_1 } else if axes_1 == 2 { out_2 } else if axes_1 == 3 { out_3 } else if axes_1 == 4 { out_4 } else { out_5 };
-        let in_2 = if axes_2 == 0 { out_0 } else if axes_2 == 1 { out_1 } else if axes_2 == 2 { out_2 } else if axes_2 == 3 { out_3 } else if axes_2 == 4 { out_4 } else { out_5 };
-        let in_3 = if axes_3 == 0 { out_0 } else if axes_3 == 1 { out_1 } else if axes_3 == 2 { out_2 } else if axes_3 == 3 { out_3 } else if axes_3 == 4 { out_4 } else { out_5 };
-        let in_4 = if axes_4 == 0 { out_0 } else if axes_4 == 1 { out_1 } else if axes_4 == 2 { out_2 } else if axes_4 == 3 { out_3 } else if axes_4 == 4 { out_4 } else { out_5 };
-        let in_5 = if axes_5 == 0 { out_0 } else if axes_5 == 1 { out_1 } else if axes_5 == 2 { out_2 } else if axes_5 == 3 { out_3 } else if axes_5 == 4 { out_4 } else { out_5 };
+        let in_0 = if axes_0 == 0 {
+            out_0
+        } else if axes_0 == 1 {
+            out_1
+        } else if axes_0 == 2 {
+            out_2
+        } else if axes_0 == 3 {
+            out_3
+        } else if axes_0 == 4 {
+            out_4
+        } else {
+            out_5
+        };
+        let in_1 = if axes_1 == 0 {
+            out_0
+        } else if axes_1 == 1 {
+            out_1
+        } else if axes_1 == 2 {
+            out_2
+        } else if axes_1 == 3 {
+            out_3
+        } else if axes_1 == 4 {
+            out_4
+        } else {
+            out_5
+        };
+        let in_2 = if axes_2 == 0 {
+            out_0
+        } else if axes_2 == 1 {
+            out_1
+        } else if axes_2 == 2 {
+            out_2
+        } else if axes_2 == 3 {
+            out_3
+        } else if axes_2 == 4 {
+            out_4
+        } else {
+            out_5
+        };
+        let in_3 = if axes_3 == 0 {
+            out_0
+        } else if axes_3 == 1 {
+            out_1
+        } else if axes_3 == 2 {
+            out_2
+        } else if axes_3 == 3 {
+            out_3
+        } else if axes_3 == 4 {
+            out_4
+        } else {
+            out_5
+        };
+        let in_4 = if axes_4 == 0 {
+            out_0
+        } else if axes_4 == 1 {
+            out_1
+        } else if axes_4 == 2 {
+            out_2
+        } else if axes_4 == 3 {
+            out_3
+        } else if axes_4 == 4 {
+            out_4
+        } else {
+            out_5
+        };
+        let in_5 = if axes_5 == 0 {
+            out_0
+        } else if axes_5 == 1 {
+            out_1
+        } else if axes_5 == 2 {
+            out_2
+        } else if axes_5 == 3 {
+            out_3
+        } else if axes_5 == 4 {
+            out_4
+        } else {
+            out_5
+        };
 
-        let in_offset = in_0 * input.stride(0) + in_1 * input.stride(1) + in_2 * input.stride(2) + in_3 * input.stride(3) + in_4 * input.stride(4) + in_5 * input.stride(5);
+        let in_offset = in_0 * input.stride(0)
+            + in_1 * input.stride(1)
+            + in_2 * input.stride(2)
+            + in_3 * input.stride(3)
+            + in_4 * input.stride(4)
+            + in_5 * input.stride(5);
         output[i] = input[in_offset];
     }
 }
@@ -591,7 +769,9 @@ fn batch_transpose_kernel<F: Float>(
 
         if global_row < rows && global_col < cols {
             // Calculate index using strides (accounts for vectorization)
-            let input_idx = batch_idx * input.stride(0) + global_row * input.stride(1) + global_col * input.stride(2);
+            let input_idx = batch_idx * input.stride(0)
+                + global_row * input.stride(1)
+                + global_col * input.stride(2);
 
             // Store in shared memory with padding
             let tile_idx = row_offset * padded_stride + thread_x;
@@ -609,8 +789,8 @@ fn batch_transpose_kernel<F: Float>(
     let mut col_offset = thread_y;
     while col_offset < tile_size {
         // Transposed coordinates: swap row/col
-        let global_row = tile_base_col + col_offset;  // Note: base_col becomes row
-        let global_col = tile_base_row + thread_x;     // Note: base_row becomes col
+        let global_row = tile_base_col + col_offset; // Note: base_col becomes row
+        let global_col = tile_base_row + thread_x; // Note: base_row becomes col
 
         if global_row < cols && global_col < rows {
             // Read from shared memory in transposed order
@@ -618,7 +798,9 @@ fn batch_transpose_kernel<F: Float>(
             let tile_idx = thread_x * padded_stride + col_offset;
 
             // Calculate index using strides (output has shape [batch, cols, rows])
-            let output_idx = batch_idx * output.stride(0) + global_row * output.stride(1) + global_col * output.stride(2);
+            let output_idx = batch_idx * output.stride(0)
+                + global_row * output.stride(1)
+                + global_col * output.stride(2);
 
             output[output_idx] = tile[tile_idx];
         }
@@ -743,7 +925,9 @@ fn batch_transpose_movement2_kernel<F: Float>(
 
         if global_row < rows && global_col < cols {
             // Tensor accesses are automatically vectorized by TensorArg
-            let input_idx = batch_idx * input.stride(0) + global_row * input.stride(1) + global_col * input.stride(2);
+            let input_idx = batch_idx * input.stride(0)
+                + global_row * input.stride(1)
+                + global_col * input.stride(2);
 
             let tile_idx = row_offset * padded_stride + thread_x;
             tile[tile_idx] = input[input_idx];
@@ -764,7 +948,9 @@ fn batch_transpose_movement2_kernel<F: Float>(
             let tile_idx = thread_x * padded_stride + col_offset;
 
             // Tensor accesses are automatically vectorized by TensorArg
-            let output_idx = batch_idx * output.stride(0) + global_row * output.stride(1) + global_col * output.stride(2);
+            let output_idx = batch_idx * output.stride(0)
+                + global_row * output.stride(1)
+                + global_col * output.stride(2);
 
             output[output_idx] = tile[tile_idx];
         }
@@ -808,21 +994,11 @@ fn launch_permute_kernel<R: Runtime, F: Float>(
 
     // Create tensor arguments
     let input_arg = unsafe {
-        TensorArg::from_raw_parts::<F>(
-            input.handle,
-            input.strides,
-            input.shape,
-            vectorization,
-        )
+        TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
     };
 
     let output_arg = unsafe {
-        TensorArg::from_raw_parts::<F>(
-            output.handle,
-            output.strides,
-            output.shape,
-            vectorization,
-        )
+        TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
     };
 
     // Dispatch to appropriate specialized kernel
@@ -830,29 +1006,17 @@ fn launch_permute_kernel<R: Runtime, F: Float>(
         if rank == 2 && axes == [1, 0] {
             // 2D transpose
             permute_kernel_2d_transpose::launch_unchecked::<F, R>(
-                client,
-                cube_count,
-                cube_dim,
-                input_arg,
-                output_arg,
+                client, cube_count, cube_dim, input_arg, output_arg,
             );
         } else if rank == 3 && axes == [0, 2, 1] {
             // 3D batch transpose
             permute_kernel_3d_021::launch_unchecked::<F, R>(
-                client,
-                cube_count,
-                cube_dim,
-                input_arg,
-                output_arg,
+                client, cube_count, cube_dim, input_arg, output_arg,
             );
         } else if rank == 3 && axes == [2, 0, 1] {
             // 3D permutation [2, 0, 1]
             permute_kernel_3d_201::launch_unchecked::<F, R>(
-                client,
-                cube_count,
-                cube_dim,
-                input_arg,
-                output_arg,
+                client, cube_count, cube_dim, input_arg, output_arg,
             );
         } else {
             // Use generic kernel for all other permutations (ranks 2-6, any axes)
@@ -980,21 +1144,11 @@ fn launch_scalar_tile_transpose<R: Runtime, F: Float>(
     let vectorization = 1;
 
     let input_arg = unsafe {
-        TensorArg::from_raw_parts::<F>(
-            input.handle,
-            input.strides,
-            input.shape,
-            vectorization,
-        )
+        TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
     };
 
     let output_arg = unsafe {
-        TensorArg::from_raw_parts::<F>(
-            output.handle,
-            output.strides,
-            output.shape,
-            vectorization,
-        )
+        TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
     };
 
     // Launch appropriate kernel based on rank
@@ -1066,21 +1220,11 @@ fn launch_vectorized_tile_transpose<R: Runtime, F: Float>(
     let vectorization = movement_size;
 
     let input_arg = unsafe {
-        TensorArg::from_raw_parts::<F>(
-            input.handle,
-            input.strides,
-            input.shape,
-            vectorization,
-        )
+        TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
     };
 
     let output_arg = unsafe {
-        TensorArg::from_raw_parts::<F>(
-            output.handle,
-            output.strides,
-            output.shape,
-            vectorization,
-        )
+        TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
     };
 
     // Launch vectorized kernel: use 2D variant for non-batched, 3D variant for batched
@@ -1128,7 +1272,11 @@ fn launch_batch_transpose_kernel<R: Runtime, F: Float>(
 ) {
     // Decide whether to use mov2 (2-element vectors) or mov4 (4-element vectors)
     let use_mov2 = check_use_mov2(rows, cols);
-    let tile_size = if use_mov2 { TILE_SIZE_MOV2 } else { TILE_SIZE_MOV4 };
+    let tile_size = if use_mov2 {
+        TILE_SIZE_MOV2
+    } else {
+        TILE_SIZE_MOV4
+    };
     let movement_size = if use_mov2 { 2 } else { 4 };
 
     // Compute tile grid dimensions
@@ -1148,21 +1296,11 @@ fn launch_batch_transpose_kernel<R: Runtime, F: Float>(
     let vectorization = 1; // We handle vectorization manually in the kernel
 
     let input_arg = unsafe {
-        TensorArg::from_raw_parts::<F>(
-            input.handle,
-            input.strides,
-            input.shape,
-            vectorization,
-        )
+        TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
     };
 
     let output_arg = unsafe {
-        TensorArg::from_raw_parts::<F>(
-            output.handle,
-            output.strides,
-            output.shape,
-            vectorization,
-        )
+        TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
     };
 
     // Launch appropriate kernel variant
@@ -1213,8 +1351,6 @@ fn should_use_tile_transpose(num_dims: usize, axes: &[usize], rows: u32, cols: u
     // Small matrices don't benefit from shared memory complexity
     pattern_match && rows >= TILE_SIZE_MOV4 && cols >= TILE_SIZE_MOV4
 }
-
-
 
 /// Check if mov2 vectorized path is viable.
 #[allow(dead_code)]
@@ -1290,8 +1426,8 @@ pub fn launch_ref<R: Runtime, F: Float>(
     let dispatch_axes = folded.folded_axes.as_slice();
 
     // Check if we can use optimized tile transpose (2D or 3D batch transpose)
-    let can_use_tile_transpose = (rank == 2 && dispatch_axes == [1, 0]) ||
-                                  (rank == 3 && dispatch_axes == [0, 2, 1]);
+    let can_use_tile_transpose =
+        (rank == 2 && dispatch_axes == [1, 0]) || (rank == 3 && dispatch_axes == [0, 2, 1]);
 
     if can_use_tile_transpose {
         let (rows, cols) = if rank == 2 {
@@ -1307,8 +1443,19 @@ pub fn launch_ref<R: Runtime, F: Float>(
 
         if use_tile {
             // Extract batch count for 3D case
-            let num_batches = if rank == 3 { folded.folded_shape[0] as u32 } else { 1 };
-            launch_batch_transpose_kernel_simple::<R, F>(client, input, output, num_batches, rows as u32, cols as u32);
+            let num_batches = if rank == 3 {
+                folded.folded_shape[0] as u32
+            } else {
+                1
+            };
+            launch_batch_transpose_kernel_simple::<R, F>(
+                client,
+                input,
+                output,
+                num_batches,
+                rows as u32,
+                cols as u32,
+            );
         } else {
             // Use naive kernel for small matrices
             launch_permute_kernel::<R, F>(client, input, output, axes);
@@ -1392,9 +1539,6 @@ fn validate_output_shape(
     }
     Ok(())
 }
-
-
- 
 
 // ===========================================================
 // SECTION IX — Optional: logging / diagnostics

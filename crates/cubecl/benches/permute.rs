@@ -1,5 +1,5 @@
-use cubecl::{frontend, prelude::*};
 use cubecl::future;
+use cubecl::{frontend, prelude::*};
 use cubecl_std::tensor::{self, TensorHandle};
 
 #[cfg(feature = "cuda")]
@@ -15,9 +15,7 @@ fn bench_permute<R: Runtime, E: frontend::Float + CubeElement>(
 
     // Allocate tensors once
     let numel: usize = input_shape.iter().product();
-    let data: Vec<E> = (0..numel)
-        .map(|i| E::from(i as f32).unwrap())
-        .collect();
+    let data: Vec<E> = (0..numel).map(|i| E::from(i as f32).unwrap()).collect();
 
     let handle = client.create(E::as_bytes(&data));
     let input = TensorHandle::<R, E>::new_contiguous(input_shape.clone(), handle);
@@ -46,8 +44,10 @@ fn bench_permute<R: Runtime, E: frontend::Float + CubeElement>(
                 let in_idx = col * w + row;
                 let expected = E::from(in_idx as f32).unwrap();
                 if actual_data[out_idx] != expected {
-                    eprintln!("❌ CORRECTNESS ERROR at [{},{}]: got {:?}, expected {:?}",
-                             row, col, actual_data[out_idx], expected);
+                    eprintln!(
+                        "❌ CORRECTNESS ERROR at [{},{}]: got {:?}, expected {:?}",
+                        row, col, actual_data[out_idx], expected
+                    );
                     eprintln!("   Kernel produced WRONG results - timings are meaningless!");
                     return;
                 }
@@ -58,12 +58,7 @@ fn bench_permute<R: Runtime, E: frontend::Float + CubeElement>(
     // FIX 1: Extended warmup (100 iterations)
     // Ensures CUDA JIT compilation, memory registration, and GPU clock ramping complete
     for _ in 0..100 {
-        tensor::permute::launch::<R, E>(
-            &client,
-            &input,
-            &axes,
-            &output,
-        );
+        tensor::permute::launch::<R, E>(&client, &input, &axes, &output);
     }
     future::block_on(client.sync());
 
@@ -74,7 +69,9 @@ fn bench_permute<R: Runtime, E: frontend::Float + CubeElement>(
 
     let mut iterations = 1;
     let target_total_bytes = 4_000_000_000.0; // 4 GB total throughput
-    while iterations < 16384 && (bytes_per_iteration as f64 * iterations as f64) < target_total_bytes {
+    while iterations < 16384
+        && (bytes_per_iteration as f64 * iterations as f64) < target_total_bytes
+    {
         iterations *= 2;
     }
     // Ensure minimum iterations for small tensors
@@ -88,12 +85,7 @@ fn bench_permute<R: Runtime, E: frontend::Float + CubeElement>(
     // Benchmark: async kernel launches with single sync at end
     let start = std::time::Instant::now();
     for _ in 0..iterations {
-        tensor::permute::launch::<R, E>(
-            &client,
-            &input,
-            &axes,
-            &output,
-        );
+        tensor::permute::launch::<R, E>(&client, &input, &axes, &output);
     }
     future::block_on(client.sync()); // Single sync measures total GPU time
     let elapsed = start.elapsed().as_secs_f64();

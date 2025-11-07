@@ -8,10 +8,8 @@ pub use contiguous::*;
 pub use handle::*;
 pub use identity::*;
 pub use matrix_batch_layout::*;
-pub use view::*;
 pub use permute::*;
-
-
+pub use view::*;
 
 pub mod layout;
 pub mod view;

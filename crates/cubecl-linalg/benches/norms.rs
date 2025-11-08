@@ -1,10 +1,12 @@
 //! Benchmarks for norm operations (L2, L-infinity, Frobenius)
+//!
+//! These benchmarks test GPU-accelerated norm computations using CubeCL kernels.
+//! All operations use actual GPU kernels with #[cube] annotation.
 
 use cubecl_core::{prelude::*, benchmark::{Benchmark, TimingMethod, ProfileDuration}, future};
 use cubecl_std::tensor::TensorHandle;
 use cubecl_random::random_uniform;
 use cubecl_linalg::{vector_norm_l2, vector_norm_inf, frobenius_norm, F32Precision};
-use std::marker::PhantomData;
 
 // ============================================================================
 // L2 Norm Benchmark
@@ -150,73 +152,7 @@ impl<R: Runtime> Benchmark for FrobeniusNormBench<R> {
 }
 
 // ============================================================================
-// CPU Baseline Benchmarks (for comparison)
-// ============================================================================
-
-struct CpuL2NormBench {
-    size: usize,
-}
-
-impl Benchmark for CpuL2NormBench {
-    type Input = Vec<f32>;
-    type Output = f32;
-
-    fn prepare(&self) -> Self::Input {
-        use rand::{SeedableRng, Rng};
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        (0..self.size).map(|_| rng.gen_range(-1.0..1.0)).collect()
-    }
-
-    fn execute(&self, input: Self::Input) -> Result<Self::Output, String> {
-        Ok(input.iter().map(|x| x * x).sum::<f32>().sqrt())
-    }
-
-    fn name(&self) -> String {
-        format!("l2_norm-cpu-f32-{}", self.size).to_lowercase()
-    }
-
-    fn sync(&self) {
-        // No-op for CPU
-    }
-
-    fn profile(&self, _args: Self::Input) -> Result<ProfileDuration, String> {
-        Err("CPU profiling not supported".to_string())
-    }
-}
-
-struct CpuLInfNormBench {
-    size: usize,
-}
-
-impl Benchmark for CpuLInfNormBench {
-    type Input = Vec<f32>;
-    type Output = f32;
-
-    fn prepare(&self) -> Self::Input {
-        use rand::{SeedableRng, Rng};
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        (0..self.size).map(|_| rng.gen_range(-1.0..1.0)).collect()
-    }
-
-    fn execute(&self, input: Self::Input) -> Result<Self::Output, String> {
-        Ok(input.iter().map(|x| x.abs()).fold(0.0_f32, f32::max))
-    }
-
-    fn name(&self) -> String {
-        format!("linf_norm-cpu-f32-{}", self.size).to_lowercase()
-    }
-
-    fn sync(&self) {
-        // No-op for CPU
-    }
-
-    fn profile(&self, _args: Self::Input) -> Result<ProfileDuration, String> {
-        Err("CPU profiling not supported".to_string())
-    }
-}
-
-// ============================================================================
-// Main benchmark runner
+// Benchmark Runners
 // ============================================================================
 
 fn run_l2_norm<R: Runtime>(device: R::Device, size: usize) {
@@ -253,23 +189,21 @@ fn run_frobenius_norm<R: Runtime>(device: R::Device, rows: usize, cols: usize) {
     println!("{}", bench.run(TimingMethod::Device).unwrap());
 }
 
-fn run_cpu_l2_norm(size: usize) {
-    let bench = CpuL2NormBench { size };
-    println!("{}", bench.name());
-    println!("{}", bench.run(TimingMethod::Device).unwrap());
-}
-
-fn run_cpu_linf_norm(size: usize) {
-    let bench = CpuLInfNormBench { size };
-    println!("{}", bench.name());
-    println!("{}", bench.run(TimingMethod::Device).unwrap());
-}
+// ============================================================================
+// Main - GPU Benchmarks
+// ============================================================================
 
 fn main() {
-    println!("=== Norm Benchmarks ===\n");
+    println!("=== GPU Norm Benchmarks ===");
+    println!("Testing GPU-accelerated norm operations with CubeCL kernels\n");
 
     // Test sizes: small, medium, large, very large
-    let sizes = vec![1024, 65536, 1048576, 16777216]; // 1K, 64K, 1M, 16M
+    let sizes = vec![
+        1024,       // 1K
+        65536,      // 64K
+        1048576,    // 1M
+        16777216,   // 16M
+    ];
 
     // Matrix sizes for Frobenius norm
     let matrix_sizes = vec![
@@ -279,43 +213,45 @@ fn main() {
         (2048, 2048),   // 4M elements
     ];
 
-    println!("\n--- L2 Norm Benchmarks ---");
+    // Determine which runtime to use
+    #[cfg(feature = "cuda")]
+    type BenchRuntime = cubecl_cuda::CudaRuntime;
 
-    // CPU baseline (pure Rust reference)
-    println!("\nCPU Baseline (Pure Rust):");
+    #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+    type BenchRuntime = cubecl_wgpu::WgpuRuntime;
+
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    type BenchRuntime = cubecl_cpu::CpuRuntime;
+
+    let device = BenchRuntime::Device::default();
+
+    println!("\n--- L2 Norm (Euclidean) ---");
+    println!("Algorithm: square → reduce_sum → sqrt");
+    println!("Kernels: 3 GPU launches per norm\n");
     for &size in &sizes {
-        run_cpu_l2_norm(size);
+        run_l2_norm::<BenchRuntime>(device.clone(), size);
     }
 
-    // CubeCL CPU Runtime (JIT compiled)
-    println!("\nCubeCL CPU Runtime (MLIR JIT):");
+    println!("\n--- L-infinity Norm ---");
+    println!("Algorithm: abs → reduce_max");
+    println!("Kernels: 2 GPU launches per norm\n");
     for &size in &sizes {
-        run_l2_norm::<cubecl_cpu::CpuRuntime>(Default::default(), size);
+        run_linf_norm::<BenchRuntime>(device.clone(), size);
     }
 
-    println!("\n--- L-infinity Norm Benchmarks ---");
-
-    // CPU baseline (pure Rust reference)
-    println!("\nCPU Baseline (Pure Rust):");
-    for &size in &sizes {
-        run_cpu_linf_norm(size);
-    }
-
-    // CubeCL CPU Runtime (JIT compiled)
-    println!("\nCubeCL CPU Runtime (MLIR JIT):");
-    for &size in &sizes {
-        run_linf_norm::<cubecl_cpu::CpuRuntime>(Default::default(), size);
-    }
-
-    println!("\n--- Frobenius Norm Benchmarks ---");
-
-    // CubeCL CPU Runtime (JIT compiled)
-    println!("\nCubeCL CPU Runtime (MLIR JIT):");
+    println!("\n--- Frobenius Norm (Matrix) ---");
+    println!("Algorithm: flatten → L2 norm");
+    println!("Kernels: 3 GPU launches per norm\n");
     for &(rows, cols) in &matrix_sizes {
-        run_frobenius_norm::<cubecl_cpu::CpuRuntime>(Default::default(), rows, cols);
+        run_frobenius_norm::<BenchRuntime>(device.clone(), rows, cols);
     }
 
     println!("\n=== Benchmark Complete ===");
-    println!("\nNote: To benchmark with CUDA or WGPU, add those crates to dev-dependencies");
-    println!("and modify main() to include those runtime tests.");
+
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    println!("\nNote: Running on CPU runtime. For GPU benchmarks, use:");
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    println!("  cargo bench --bench norms --features cuda");
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    println!("  cargo bench --bench norms --features wgpu");
 }

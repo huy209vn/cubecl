@@ -1,0 +1,71 @@
+[package]
+authors = ["Tracel AI <info@tracel.ai>"]
+categories = ["science", "mathematics", "algorithms"]
+description = "CubeCL Linear Algebra Operations"
+edition.workspace = true
+keywords = ["gpu", "linear-algebra", "cholesky", "lu", "solver"]
+license.workspace = true
+name = "cubecl-linalg"
+readme.workspace = true
+repository = "https://github.com/tracel-ai/cubecl/tree/main/crates/cubecl-linalg"
+version.workspace = true
+
+[features]
+default = ["std", "cubecl-runtime/default", "cubecl-core/default"]
+export_tests = ["pretty_assertions"]
+std = ["cubecl-runtime/std", "cubecl-core/std"]
+
+# Test feature flags
+linalg_tests_norms = []
+linalg_tests_triangular = []
+linalg_tests_cholesky = []
+linalg_tests_lu = []
+linalg_tests_newton_schulz = []
+linalg_tests_solvers = []
+
+linalg_tests_f16 = []
+linalg_tests_f32 = []
+linalg_tests_f64 = []
+
+linalg_tests_batching = []
+linalg_tests_conditioning = []
+linalg_tests_mixed_precision = []
+
+linalg_tests_base = [
+    "linalg_tests_norms",
+    "linalg_tests_triangular",
+    "linalg_tests_cholesky",
+    "linalg_tests_f32",
+]
+
+linalg_tests_all = [
+    "linalg_tests_norms",
+    "linalg_tests_triangular",
+    "linalg_tests_cholesky",
+    "linalg_tests_lu",
+    "linalg_tests_newton_schulz",
+    "linalg_tests_solvers",
+    "linalg_tests_f16",
+    "linalg_tests_f32",
+    "linalg_tests_f64",
+    "linalg_tests_batching",
+    "linalg_tests_conditioning",
+    "linalg_tests_mixed_precision",
+]
+
+[dependencies]
+bytemuck = { workspace = true }
+cubecl-common = { path = "../cubecl-common", version = "0.9.0", default-features = false }
+cubecl-core = { path = "../cubecl-core", version = "0.9.0", default-features = false }
+cubecl-runtime = { path = "../cubecl-runtime", version = "0.9.0", default-features = false }
+cubecl-std = { path = "../cubecl-std", version = "0.9.0", default-features = false }
+cubecl-reduce = { path = "../cubecl-reduce", version = "0.9.0", default-features = false }
+cubecl-matmul = { path = "../cubecl-matmul", version = "0.9.0", default-features = false }
+cubecl-random = { path = "../cubecl-random", version = "0.9.0", default-features = false }
+half = { workspace = true, features = ["bytemuck"] }
+thiserror = { workspace = true }
+once_cell = "1.20"
+pretty_assertions = { workspace = true, optional = true }
+
+[dev-dependencies]
+approx = "0.5"

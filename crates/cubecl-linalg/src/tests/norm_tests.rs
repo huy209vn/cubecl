@@ -167,7 +167,8 @@ mod tests {
         let result_value = f32::from_bytes(&result_bytes)[0];
 
         // Higher tolerance for large sums due to floating point accumulation in 2-stage reduction
-        assert_relative_eq!(result_value, expected, epsilon = 5e-3);
+        // Using max_relative for proper relative error checking (not absolute epsilon)
+        assert_relative_eq!(result_value, expected, max_relative = 5e-3);
     }
 
     #[test]

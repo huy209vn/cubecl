@@ -136,4 +136,148 @@ mod tests {
     fn test_frobenius_norm_f32() {
         test_frobenius_norm_impl::<TestRuntime>(&Default::default());
     }
+
+    // Test large vectors that trigger 2-stage reduction
+    #[test]
+    fn test_norm_l2_large() {
+        let device = Default::default();
+        let client = TestRuntime::client(&device);
+
+        // Create large vector (2M elements to trigger 2-stage reduction)
+        let size = 2_000_000;
+        let values: Vec<f32> = (0..size).map(|i| (i % 100) as f32 / 100.0).collect();
+        let expected = cpu_norm_l2(&values);
+
+        let input_handle = client.create(f32::as_bytes(&values));
+        let input = unsafe {
+            TensorHandleRef::<TestRuntime>::from_raw_parts(
+                &input_handle,
+                &[1],
+                &[size],
+                std::mem::size_of::<f32>(),
+            )
+        };
+
+        let result = vector_norm_l2::<TestRuntime, F32Precision>(&client, input)
+            .expect("norm_l2 large failed");
+
+        let result_bytes = client.read_one(result.handle.clone());
+        let result_value = f32::from_bytes(&result_bytes)[0];
+
+        // Slightly higher tolerance for large sums due to floating point accumulation
+        assert_relative_eq!(result_value, expected, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn test_norm_inf_large() {
+        let device = Default::default();
+        let client = TestRuntime::client(&device);
+
+        let size = 2_000_000;
+        let values: Vec<f32> = (0..size).map(|i| {
+            let val = (i % 1000) as f32 / 10.0;
+            if i % 7 == 0 { -val } else { val }
+        }).collect();
+        let expected = cpu_norm_inf(&values);
+
+        let input_handle = client.create(f32::as_bytes(&values));
+        let input = unsafe {
+            TensorHandleRef::<TestRuntime>::from_raw_parts(
+                &input_handle,
+                &[1],
+                &[size],
+                std::mem::size_of::<f32>(),
+            )
+        };
+
+        let result = vector_norm_inf::<TestRuntime, F32Precision>(&client, input)
+            .expect("norm_inf large failed");
+
+        let result_bytes = client.read_one(result.handle.clone());
+        let result_value = f32::from_bytes(&result_bytes)[0];
+
+        assert_relative_eq!(result_value, expected, epsilon = 1e-5);
+    }
+
+    // Test various sizes to ensure 2-stage threshold works correctly
+    #[test]
+    fn test_norm_l2_various_sizes() {
+        let device = Default::default();
+        let client = TestRuntime::client(&device);
+
+        let test_sizes = vec![
+            100,        // Small (single-stage)
+            10_000,     // Medium (single-stage)
+            999_999,    // Just below threshold
+            1_000_001,  // Just above threshold (2-stage)
+            4_194_304,  // Large power of 2
+        ];
+
+        for size in test_sizes {
+            let values: Vec<f32> = (0..size).map(|i| ((i * 7) % 101) as f32 / 50.0).collect();
+            let expected = cpu_norm_l2(&values);
+
+            let input_handle = client.create(f32::as_bytes(&values));
+            let input = unsafe {
+                TensorHandleRef::<TestRuntime>::from_raw_parts(
+                    &input_handle,
+                    &[1],
+                    &[size],
+                    std::mem::size_of::<f32>(),
+                )
+            };
+
+            let result = vector_norm_l2::<TestRuntime, F32Precision>(&client, input)
+                .expect(&format!("norm_l2 failed for size {}", size));
+
+            let result_bytes = client.read_one(result.handle.clone());
+            let result_value = f32::from_bytes(&result_bytes)[0];
+
+            assert_relative_eq!(
+                result_value, expected,
+                epsilon = 1e-3,
+                "Failed for size {}", size
+            );
+        }
+    }
+
+    // Test edge cases
+    #[test]
+    fn test_norm_edge_cases() {
+        let device = Default::default();
+        let client = TestRuntime::client(&device);
+
+        // All zeros
+        let values = vec![0.0_f32; 1000];
+        let input_handle = client.create(f32::as_bytes(&values));
+        let input = unsafe {
+            TensorHandleRef::<TestRuntime>::from_raw_parts(
+                &input_handle,
+                &[1],
+                &[1000],
+                std::mem::size_of::<f32>(),
+            )
+        };
+        let result = vector_norm_l2::<TestRuntime, F32Precision>(&client, input).unwrap();
+        let result_bytes = client.read_one(result.handle.clone());
+        let result_value = f32::from_bytes(&result_bytes)[0];
+        assert_relative_eq!(result_value, 0.0, epsilon = 1e-7);
+
+        // All ones
+        let values = vec![1.0_f32; 1024];
+        let expected = (1024.0_f32).sqrt();
+        let input_handle = client.create(f32::as_bytes(&values));
+        let input = unsafe {
+            TensorHandleRef::<TestRuntime>::from_raw_parts(
+                &input_handle,
+                &[1],
+                &[1024],
+                std::mem::size_of::<f32>(),
+            )
+        };
+        let result = vector_norm_l2::<TestRuntime, F32Precision>(&client, input).unwrap();
+        let result_bytes = client.read_one(result.handle.clone());
+        let result_value = f32::from_bytes(&result_bytes)[0];
+        assert_relative_eq!(result_value, expected, epsilon = 1e-5);
+    }
 }

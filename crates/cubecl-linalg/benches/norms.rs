@@ -223,7 +223,7 @@ fn main() {
     #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
     type BenchRuntime = cubecl_cpu::CpuRuntime;
 
-    let device = Default::default();
+    let device: <BenchRuntime as Runtime>::Device = Default::default();
 
     println!("\n--- L2 Norm (Euclidean) ---");
     println!("Algorithm: square → reduce_sum → sqrt");

@@ -167,9 +167,9 @@ fn run_l2_norm<R: Runtime>(device: R::Device, size: usize) {
     println!("{}", result);
 
     // Calculate bandwidth
-    // L2 norm: square (read+write) + reduce (read) + sqrt (negligible)
-    // Approximate: 3 full passes over data
-    let bytes = (size * 4 * 3) as f64; // f32 = 4 bytes, ~3 passes
+    // L2 norm (OPTIMIZED): reduce_sum_squared (read) + sqrt (negligible)
+    // Approximate: 1 read pass for reduce, minimal for sqrt
+    let bytes = (size * 4) as f64; // f32 = 4 bytes, 1 read pass
     let time_s = result.median.as_secs_f64();
     let gb_per_s = bytes / time_s / 1e9;
     println!("  Bandwidth   {:.2} GB/s\n", gb_per_s);
@@ -187,9 +187,9 @@ fn run_linf_norm<R: Runtime>(device: R::Device, size: usize) {
     println!("{}", result);
 
     // Calculate bandwidth
-    // L-inf norm: abs (read+write) + reduce_max (read)
-    // Approximate: 2.5 full passes over data
-    let bytes = (size * 4 * 2) as f64; // f32 = 4 bytes, ~2 passes
+    // L-inf norm (OPTIMIZED): reduce_max_abs (read, fused abs)
+    // Approximate: 1 read pass with inline abs
+    let bytes = (size * 4) as f64; // f32 = 4 bytes, 1 read pass
     let time_s = result.median.as_secs_f64();
     let gb_per_s = bytes / time_s / 1e9;
     println!("  Bandwidth   {:.2} GB/s\n", gb_per_s);
@@ -208,9 +208,9 @@ fn run_frobenius_norm<R: Runtime>(device: R::Device, rows: usize, cols: usize) {
     println!("{}", result);
 
     // Calculate bandwidth
-    // Frobenius norm uses L2 pipeline: 3 passes
+    // Frobenius norm (OPTIMIZED): uses L2 pipeline (reduce_sum_squared + sqrt)
     let size = rows * cols;
-    let bytes = (size * 4 * 3) as f64; // f32 = 4 bytes, ~3 passes
+    let bytes = (size * 4) as f64; // f32 = 4 bytes, 1 read pass
     let time_s = result.median.as_secs_f64();
     let gb_per_s = bytes / time_s / 1e9;
     println!("  Bandwidth   {:.2} GB/s\n", gb_per_s);
@@ -257,22 +257,22 @@ fn main() {
     let device: <BenchRuntime as Runtime>::Device = Default::default();
 
     println!("\n--- L2 Norm (Euclidean) ---");
-    println!("Algorithm: square → reduce_sum → sqrt");
-    println!("Kernels: 3 GPU launches per norm\n");
+    println!("Algorithm: reduce_sum_squared → sqrt (FUSED)");
+    println!("Kernels: 2 GPU launches per norm (optimized from 3)\n");
     for &size in &sizes {
         run_l2_norm::<BenchRuntime>(device.clone(), size);
     }
 
     println!("\n--- L-infinity Norm ---");
-    println!("Algorithm: abs → reduce_max");
-    println!("Kernels: 2 GPU launches per norm\n");
+    println!("Algorithm: reduce_max_abs (FUSED)");
+    println!("Kernels: 1 GPU launch per norm (optimized from 2)\n");
     for &size in &sizes {
         run_linf_norm::<BenchRuntime>(device.clone(), size);
     }
 
     println!("\n--- Frobenius Norm (Matrix) ---");
-    println!("Algorithm: flatten → L2 norm");
-    println!("Kernels: 3 GPU launches per norm\n");
+    println!("Algorithm: flatten → L2 norm (FUSED)");
+    println!("Kernels: 2 GPU launches per norm (optimized from 3)\n");
     for &(rows, cols) in &matrix_sizes {
         run_frobenius_norm::<BenchRuntime>(device.clone(), rows, cols);
     }

@@ -11,15 +11,17 @@
 
 use cubecl_core::prelude::*;
 use cubecl_reduce::{reduce};
-use cubecl_reduce::instructions::{Sum, Max};
+use cubecl_reduce::instructions::MaxAbs;
 use cubecl_std::tensor::TensorHandle;
 
 use crate::{LinalgPrecision, LinalgResult, LinalgError};
-use crate::kernels::{square_kernel, abs_kernel, sqrt_kernel};
+use crate::kernels::{sqrt_kernel, SumSquared};
 
 /// L2 norm (Euclidean norm) of a vector: ||x||_2 = sqrt(sum(x_i^2))
 ///
 /// Returns a 0-D tensor containing the norm value on the device.
+///
+/// **Optimized**: Uses fused SumSquared reducer (2 kernel launches instead of 3).
 ///
 /// # Arguments
 ///
@@ -40,31 +42,21 @@ where
     P::EW: Float,
     P::EA: Float,
 {
-    // 1. Compute x^2 element-wise
-    let x_squared = TensorHandle::<R, P::EA>::empty(client, x.shape.to_vec());
-
-    square_kernel::launch::<P::EA, R>(
-        client,
-        CubeCount::Static(1, 1, 1),
-        CubeDim::new(256, 1, 1),
-        x.as_tensor_arg(1),
-        x_squared.as_arg(1),
-    );
-
-    // 2. Sum all elements
+    // 1. SumSquared reducer: computes sum(x^2) in a single fused kernel
+    // No separate square_kernel needed - squaring is computed inline during reduction
     let sum_shape = vec![1];
     let sum_output = TensorHandle::<R, P::EA>::empty(client, sum_shape.clone());
 
-    reduce::<R, (P::EA, P::EA), P::EA, Sum>(
+    reduce::<R, (P::EA, P::EA), P::EA, SumSquared>(
         client,
-        x_squared.as_ref(),
+        x,
         sum_output.as_ref(),
-        0, // Reduce along dimension 0 (after reshaping)
+        0, // Reduce along dimension 0
         None, // Auto strategy
         (),
     ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
 
-    // 3. Take square root
+    // 2. Take square root (still separate kernel, but unavoidable)
     let norm_output = TensorHandle::<R, P::EA>::empty(client, sum_shape);
 
     sqrt_kernel::launch::<P::EA, R>(
@@ -81,6 +73,8 @@ where
 /// L-infinity norm of a vector: ||x||_∞ = max(|x_i|)
 ///
 /// Returns a 0-D tensor containing the norm value on the device.
+///
+/// **Optimized**: Uses fused MaxAbs reducer (1 kernel launch instead of 2).
 ///
 /// # Arguments
 ///
@@ -100,24 +94,14 @@ where
     P::EW: Float,
     P::EA: Float,
 {
-    // 1. Compute |x| element-wise
-    let x_abs = TensorHandle::<R, P::EA>::empty(client, x.shape.to_vec());
-
-    abs_kernel::launch::<P::EA, R>(
-        client,
-        CubeCount::Static(1, 1, 1),
-        CubeDim::new(256, 1, 1),
-        x.as_tensor_arg(1),
-        x_abs.as_arg(1),
-    );
-
-    // 2. Find maximum
+    // MaxAbs reducer: computes max(|x|) in a single fused kernel
+    // No separate abs_kernel needed - abs is computed inline during reduction
     let max_shape = vec![1];
     let max_output = TensorHandle::<R, P::EA>::empty(client, max_shape);
 
-    reduce::<R, (P::EA, P::EA), P::EA, Max>(
+    reduce::<R, (P::EA, P::EA), P::EA, MaxAbs>(
         client,
-        x_abs.as_ref(),
+        x,
         max_output.as_ref(),
         0, // Reduce along dimension 0
         None,

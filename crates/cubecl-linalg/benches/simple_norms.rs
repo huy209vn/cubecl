@@ -23,21 +23,43 @@ fn bench_size(client: &ComputeClient<<BenchRuntime as Runtime>::Server>, size: u
     let input = TensorHandle::<BenchRuntime, f32>::empty(client, vec![size]);
     random_uniform::<BenchRuntime, f32>(client, f32::from_int(-1), f32::from_int(1), input.as_ref());
 
-    // Warmup
+    // Force sync after data creation
+    future::block_on(client.sync());
+
+    // Warmup - with result readback to ensure computation happens
     for _ in 0..3 {
-        let _ = vector_norm_l2::<BenchRuntime, F32Precision>(client, input.as_ref()).unwrap();
+        let result = vector_norm_l2::<BenchRuntime, F32Precision>(client, input.as_ref()).unwrap();
+        // Read result to force computation (prevent optimization)
+        let _bytes = client.read_one(result.handle.clone());
     }
     future::block_on(client.sync());
 
     // Benchmark
     let mut times = Vec::new();
+    let mut results = Vec::new();
 
     for _ in 0..10 {
+        future::block_on(client.sync()); // Ensure clean slate
+
         let start = Instant::now();
-        let _result = vector_norm_l2::<BenchRuntime, F32Precision>(client, input.as_ref()).unwrap();
-        future::block_on(client.sync());
+        let result = vector_norm_l2::<BenchRuntime, F32Precision>(client, input.as_ref()).unwrap();
+
+        // CRITICAL: Read result to force GPU to actually execute the kernels
+        // Without this, kernels may be queued but not executed
+        let result_bytes = client.read_one(result.handle.clone());
         let elapsed = start.elapsed();
+
         times.push(elapsed);
+        results.push(f32::from_bytes(&result_bytes)[0]);
+    }
+
+    // Verify results are consistent (sanity check)
+    let first = results[0];
+    for (i, &r) in results.iter().enumerate() {
+        let diff = (r - first).abs() / first.max(1e-6);
+        if diff > 1e-4 {
+            println!("  WARNING: Result mismatch at iteration {}: {} vs {}", i, r, first);
+        }
     }
 
     // Stats
@@ -45,7 +67,11 @@ fn bench_size(client: &ComputeClient<<BenchRuntime as Runtime>::Server>, size: u
     let median = times[times.len() / 2];
     let min = times[0];
 
-    // Bandwidth
+    // Bandwidth calculation
+    // For 2-stage reduction, we actually do MORE work:
+    // Stage 1: Read all data, reduce to intermediate
+    // Stage 2: Read intermediate, reduce to scalar
+    // But the dominant cost is the first read of all data
     let bytes = (size * 4) as f64;
     let median_s = median.as_secs_f64();
     let gb_per_s = bytes / median_s / 1e9;
@@ -53,6 +79,7 @@ fn bench_size(client: &ComputeClient<<BenchRuntime as Runtime>::Server>, size: u
     println!("  Min:        {:?}", min);
     println!("  Median:     {:?}", median);
     println!("  Bandwidth:  {:.2} GB/s", gb_per_s);
+    println!("  Result:     {:.6}", first);
 }
 
 fn main() {

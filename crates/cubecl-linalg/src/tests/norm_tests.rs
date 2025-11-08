@@ -149,11 +149,13 @@ mod tests {
         let expected = cpu_norm_l2(&values);
 
         let input_handle = client.create(f32::as_bytes(&values));
+        let strides = vec![1];
+        let shape = vec![size];
         let input = unsafe {
             TensorHandleRef::<TestRuntime>::from_raw_parts(
                 &input_handle,
-                &[1],
-                &[size],
+                &strides,
+                &shape,
                 std::mem::size_of::<f32>(),
             )
         };
@@ -181,11 +183,13 @@ mod tests {
         let expected = cpu_norm_inf(&values);
 
         let input_handle = client.create(f32::as_bytes(&values));
+        let strides = vec![1];
+        let shape = vec![size];
         let input = unsafe {
             TensorHandleRef::<TestRuntime>::from_raw_parts(
                 &input_handle,
-                &[1],
-                &[size],
+                &strides,
+                &shape,
                 std::mem::size_of::<f32>(),
             )
         };
@@ -218,11 +222,13 @@ mod tests {
             let expected = cpu_norm_l2(&values);
 
             let input_handle = client.create(f32::as_bytes(&values));
+            let strides = vec![1];
+            let shape = vec![size];
             let input = unsafe {
                 TensorHandleRef::<TestRuntime>::from_raw_parts(
                     &input_handle,
-                    &[1],
-                    &[size],
+                    &strides,
+                    &shape,
                     std::mem::size_of::<f32>(),
                 )
             };

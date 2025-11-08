@@ -233,10 +233,12 @@ mod tests {
             let result_bytes = client.read_one(result.handle.clone());
             let result_value = f32::from_bytes(&result_bytes)[0];
 
-            assert_relative_eq!(
-                result_value, expected,
-                epsilon = 1e-3,
-                "Failed for size {}", size
+            let diff = (result_value - expected).abs();
+            let rel_error = diff / expected.max(1e-6);
+            assert!(
+                rel_error < 1e-3,
+                "Failed for size {}: got {}, expected {}, rel_error = {}",
+                size, result_value, expected, rel_error
             );
         }
     }

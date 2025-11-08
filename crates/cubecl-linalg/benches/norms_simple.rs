@@ -42,8 +42,11 @@ fn bench_norm_gpu(size: usize) {
         }, "l2_norm");
 
         match result {
-            Ok(duration) => {
-                gpu_times.push(duration.mean_time());
+            Ok(profile_duration) => {
+                // Resolve the profile future to get actual timing
+                let ticks = future::block_on(profile_duration.resolve());
+                let duration = ticks.duration();
+                gpu_times.push(duration);
             }
             Err(e) => {
                 println!("Profile error: {:?}", e);

@@ -163,7 +163,16 @@ fn run_l2_norm<R: Runtime>(device: R::Device, size: usize) {
         client,
     };
     println!("{}", bench.name());
-    println!("{}", bench.run(TimingMethod::Device).unwrap());
+    let result = bench.run(TimingMethod::Device).unwrap();
+    println!("{}", result);
+
+    // Calculate bandwidth
+    // L2 norm: square (read+write) + reduce (read) + sqrt (negligible)
+    // Approximate: 3 full passes over data
+    let bytes = (size * 4 * 3) as f64; // f32 = 4 bytes, ~3 passes
+    let time_s = result.median.as_secs_f64();
+    let gb_per_s = bytes / time_s / 1e9;
+    println!("  Bandwidth   {:.2} GB/s\n", gb_per_s);
 }
 
 fn run_linf_norm<R: Runtime>(device: R::Device, size: usize) {
@@ -174,7 +183,16 @@ fn run_linf_norm<R: Runtime>(device: R::Device, size: usize) {
         client,
     };
     println!("{}", bench.name());
-    println!("{}", bench.run(TimingMethod::Device).unwrap());
+    let result = bench.run(TimingMethod::Device).unwrap();
+    println!("{}", result);
+
+    // Calculate bandwidth
+    // L-inf norm: abs (read+write) + reduce_max (read)
+    // Approximate: 2.5 full passes over data
+    let bytes = (size * 4 * 2) as f64; // f32 = 4 bytes, ~2 passes
+    let time_s = result.median.as_secs_f64();
+    let gb_per_s = bytes / time_s / 1e9;
+    println!("  Bandwidth   {:.2} GB/s\n", gb_per_s);
 }
 
 fn run_frobenius_norm<R: Runtime>(device: R::Device, rows: usize, cols: usize) {
@@ -186,7 +204,16 @@ fn run_frobenius_norm<R: Runtime>(device: R::Device, rows: usize, cols: usize) {
         client,
     };
     println!("{}", bench.name());
-    println!("{}", bench.run(TimingMethod::Device).unwrap());
+    let result = bench.run(TimingMethod::Device).unwrap();
+    println!("{}", result);
+
+    // Calculate bandwidth
+    // Frobenius norm uses L2 pipeline: 3 passes
+    let size = rows * cols;
+    let bytes = (size * 4 * 3) as f64; // f32 = 4 bytes, ~3 passes
+    let time_s = result.median.as_secs_f64();
+    let gb_per_s = bytes / time_s / 1e9;
+    println!("  Bandwidth   {:.2} GB/s\n", gb_per_s);
 }
 
 // ============================================================================
@@ -195,7 +222,11 @@ fn run_frobenius_norm<R: Runtime>(device: R::Device, rows: usize, cols: usize) {
 
 fn main() {
     println!("=== GPU Norm Benchmarks ===");
-    println!("Testing GPU-accelerated norm operations with CubeCL kernels\n");
+    println!("Testing GPU-accelerated norm operations with CubeCL kernels");
+    println!("\nBandwidth Analysis:");
+    println!("  Modern GPUs: 200-900 GB/s (GDDR6/HBM)");
+    println!("  Target: >50% peak bandwidth for large workloads");
+    println!("  Note: Multiple kernel launches reduce efficiency\n");
 
     // Test sizes: small, medium, large, very large
     let sizes = vec![
@@ -247,6 +278,15 @@ fn main() {
     }
 
     println!("\n=== Benchmark Complete ===");
+
+    println!("\n⚠️  Performance Analysis:");
+    println!("  If bandwidth is <50 GB/s on modern GPU:");
+    println!("    - Multiple kernel launches = high overhead");
+    println!("    - Consider fused kernels to reduce launches");
+    println!("    - cubecl-reduce may need optimization");
+    println!("    - Kernel launch latency dominates small sizes");
+    println!("\n  SOTA target: >300 GB/s for large workloads");
+    println!("  Current approach: Correctness first, optimize later");
 
     #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
     println!("\nNote: Running on CPU runtime. For GPU benchmarks, use:");

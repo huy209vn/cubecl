@@ -10,9 +10,9 @@
 //! unnecessary CPU synchronization.
 
 use cubecl_core::prelude::*;
-use cubecl_reduce::{reduce, ReduceStrategy, Sum, Max};
+use cubecl_reduce::{reduce};
+use cubecl_reduce::instructions::{Sum, Max};
 use cubecl_std::tensor::TensorHandle;
-use cubecl_runtime::ComputeClient;
 
 use crate::{LinalgPrecision, LinalgResult, LinalgError};
 use crate::kernels::{square_kernel, abs_kernel, sqrt_kernel};
@@ -40,9 +40,6 @@ where
     P::EW: Float,
     P::EA: Float,
 {
-    // Total number of elements
-    let n: usize = x.shape.iter().product();
-
     // 1. Compute x^2 element-wise
     let x_squared = TensorHandle::<R, P::EA>::empty(client, x.shape.to_vec());
 
@@ -50,7 +47,7 @@ where
         client,
         CubeCount::Static(1, 1, 1),
         CubeDim::new(256, 1, 1),
-        x.as_arg(1),
+        x.as_tensor_arg(1),
         x_squared.as_arg(1),
     );
 
@@ -58,7 +55,7 @@ where
     let sum_shape = vec![1];
     let sum_output = TensorHandle::<R, P::EA>::empty(client, sum_shape.clone());
 
-    reduce::<R, P::EA, P::EA, Sum>(
+    reduce::<R, (P::EA, P::EA), P::EA, Sum>(
         client,
         x_squared.as_ref(),
         sum_output.as_ref(),
@@ -110,7 +107,7 @@ where
         client,
         CubeCount::Static(1, 1, 1),
         CubeDim::new(256, 1, 1),
-        x.as_arg(1),
+        x.as_tensor_arg(1),
         x_abs.as_arg(1),
     );
 
@@ -118,7 +115,7 @@ where
     let max_shape = vec![1];
     let max_output = TensorHandle::<R, P::EA>::empty(client, max_shape);
 
-    reduce::<R, P::EA, P::EA, Max>(
+    reduce::<R, (P::EA, P::EA), P::EA, Max>(
         client,
         x_abs.as_ref(),
         max_output.as_ref(),
@@ -185,9 +182,9 @@ where
 /// let spectral = spectral_norm_est::<R, F32Precision>(client, a.as_ref(), 10)?;
 /// ```
 pub fn spectral_norm_est<R: Runtime, P: LinalgPrecision>(
-    client: &ComputeClient<R::Server>,
-    a: TensorHandleRef<R>,
-    k_iters: usize,
+    _client: &ComputeClient<R::Server>,
+    _a: TensorHandleRef<R>,
+    _k_iters: usize,
 ) -> LinalgResult<TensorHandle<R, P::EA>>
 where
     P::EW: Float,

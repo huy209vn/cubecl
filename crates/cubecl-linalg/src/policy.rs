@@ -1,8 +1,7 @@
 //! Global policy and auto-tuning cache for linear algebra operations.
 
 use core::fmt;
-use cubecl_core::Runtime;
-use cubecl_runtime::ComputeClient;
+use cubecl_core::{Runtime, client::ComputeClient};
 use once_cell::sync::Lazy;
 
 #[cfg(feature = "std")]

@@ -52,11 +52,13 @@ where
 
     // Flatten the tensor to 1D for reduction (zero-copy view)
     let total_elements: usize = x.shape.iter().product();
+    let flat_stride = vec![1];
+    let flat_shape = vec![total_elements];
     let x_flat = unsafe {
         TensorHandleRef::<R>::from_raw_parts(
             x.handle,
-            &[1],  // Contiguous stride
-            &[total_elements],  // Flattened shape
+            &flat_stride,
+            &flat_shape,
             x.elem_size,
         )
     };
@@ -184,11 +186,13 @@ where
 
     // Flatten the tensor to 1D for reduction (zero-copy view)
     let total_elements: usize = x.shape.iter().product();
+    let flat_stride = vec![1];
+    let flat_shape = vec![total_elements];
     let x_flat = unsafe {
         TensorHandleRef::<R>::from_raw_parts(
             x.handle,
-            &[1],  // Contiguous stride
-            &[total_elements],  // Flattened shape
+            &flat_stride,
+            &flat_shape,
             x.elem_size,
         )
     };

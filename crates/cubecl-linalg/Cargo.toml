@@ -92,7 +92,3 @@ harness = false
 [[bench]]
 name = "norms_simple"
 harness = false
-
-[[bench]]
-name = "norms_dumb"
-harness = false

@@ -48,28 +48,98 @@ where
     P::EW: Float,
     P::EA: Float,
 {
-    // 1. SumSquared reducer: computes sum(x^2) in a single fused kernel
-    // No separate square_kernel needed - squaring is computed inline during reduction
-    let sum_shape = vec![1];
-    let sum_output = TensorHandle::<R, P::EA>::empty(client, sum_shape.clone());
+    use cubecl_reduce::instructions::Sum;
 
-    reduce::<R, (P::EA, P::EA), P::EA, SumSquared>(
-        client,
-        x,
-        sum_output.as_ref(),
-        0, // Reduce along dimension 0
-        None, // Auto strategy
-        (),
-    ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
+    // OPTIMIZATION: For large 1D tensors, cubecl-reduce uses only 1 cube when reducing to [1]
+    // We reshape to 2D to enable parallel reduction across many cubes
+    let total_elements: usize = x.shape.iter().product();
 
-    // 2. Take square root (still separate kernel, but unavoidable)
-    let norm_output = TensorHandle::<R, P::EA>::empty(client, sum_shape);
+    // Choose a good intermediate size for 2-stage reduction
+    // Target: ~4K-8K intermediate elements for good parallelism
+    let intermediate_size = if total_elements > 1_000_000 {
+        // Large tensor: use 2-stage reduction
+        let sqrt_n = (total_elements as f64).sqrt().ceil() as usize;
+        // Round to nice number for better alignment
+        let chunk_size = (sqrt_n + 255) / 256 * 256;
+        total_elements.div_ceil(chunk_size).max(1024).min(8192)
+    } else {
+        // Small tensor: single-stage is fine
+        1
+    };
+
+    let intermediate_output;
+
+    if intermediate_size > 1 {
+        // Stage 1: Reduce to intermediate size with high parallelism
+        // Reshape [N] as [intermediate_size, N/intermediate_size]
+        let chunk_size = total_elements / intermediate_size;
+
+        // Create reshaped view (no data copy!)
+        let reshaped_shape = vec![intermediate_size, chunk_size];
+        let reshaped_strides = vec![chunk_size, 1];
+        let x_reshaped = unsafe {
+            TensorHandleRef::<R>::from_raw_parts(
+                x.handle,
+                &reshaped_strides,
+                &reshaped_shape,
+                x.elem_size,
+            )
+        };
+
+        // Reduce along axis 1: [M, N] → [M, 1] using SumSquared
+        let mut stage1_shape = reshaped_shape.clone();
+        stage1_shape[1] = 1;
+        let stage1_output = TensorHandle::<R, P::EA>::empty(client, stage1_shape.clone());
+
+        reduce::<R, (P::EA, P::EA), P::EA, SumSquared>(
+            client,
+            x_reshaped,
+            stage1_output.as_ref(),
+            1, // Reduce along axis 1 (inner dimension)
+            None,
+            (),
+        ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
+
+        // Stage 2: Reduce [M, 1] → [1, 1] using Sum
+        let mut final_shape = stage1_shape.clone();
+        final_shape[0] = 1;
+        let sum_output = TensorHandle::<R, P::EA>::empty(client, final_shape);
+
+        reduce::<R, (P::EA, P::EA), P::EA, Sum>(
+            client,
+            stage1_output.as_ref(),
+            sum_output.as_ref(),
+            0, // Reduce along axis 0
+            None,
+            (),
+        ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
+
+        intermediate_output = sum_output;
+    } else {
+        // Single-stage reduction for small tensors
+        let sum_shape = vec![1];
+        let sum_output = TensorHandle::<R, P::EA>::empty(client, sum_shape.clone());
+
+        reduce::<R, (P::EA, P::EA), P::EA, SumSquared>(
+            client,
+            x,
+            sum_output.as_ref(),
+            0,
+            None,
+            (),
+        ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
+
+        intermediate_output = sum_output;
+    }
+
+    // Final step: Take square root
+    let norm_output = TensorHandle::<R, P::EA>::empty(client, vec![1]);
 
     sqrt_kernel::launch::<P::EA, R>(
         client,
         CubeCount::Static(1, 1, 1),
         CubeDim::new(1, 1, 1),
-        sum_output.as_arg(1),
+        intermediate_output.as_arg(1),
         norm_output.as_arg(1),
     );
 
@@ -100,21 +170,83 @@ where
     P::EW: Float,
     P::EA: Float,
 {
-    // MaxAbs reducer: computes max(|x|) in a single fused kernel
-    // No separate abs_kernel needed - abs is computed inline during reduction
-    let max_shape = vec![1];
-    let max_output = TensorHandle::<R, P::EA>::empty(client, max_shape);
+    use cubecl_reduce::instructions::Max;
 
-    reduce::<R, (P::EA, P::EA), P::EA, MaxAbs>(
-        client,
-        x,
-        max_output.as_ref(),
-        0, // Reduce along dimension 0
-        None,
-        (),
-    ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
+    // OPTIMIZATION: Use 2-stage reduction for large tensors to enable parallelism
+    let total_elements: usize = x.shape.iter().product();
 
-    Ok(max_output)
+    let intermediate_size = if total_elements > 1_000_000 {
+        let sqrt_n = (total_elements as f64).sqrt().ceil() as usize;
+        let chunk_size = (sqrt_n + 255) / 256 * 256;
+        total_elements.div_ceil(chunk_size).max(1024).min(8192)
+    } else {
+        1
+    };
+
+    let intermediate_output;
+
+    if intermediate_size > 1 {
+        // Stage 1: Reduce to intermediate size
+        let chunk_size = total_elements / intermediate_size;
+
+        let reshaped_shape = vec![intermediate_size, chunk_size];
+        let reshaped_strides = vec![chunk_size, 1];
+        let x_reshaped = unsafe {
+            TensorHandleRef::<R>::from_raw_parts(
+                x.handle,
+                &reshaped_strides,
+                &reshaped_shape,
+                x.elem_size,
+            )
+        };
+
+        // Reduce along axis 1: [M, N] → [M, 1] using MaxAbs
+        let mut stage1_shape = reshaped_shape.clone();
+        stage1_shape[1] = 1;
+        let stage1_output = TensorHandle::<R, P::EA>::empty(client, stage1_shape.clone());
+
+        reduce::<R, (P::EA, P::EA), P::EA, MaxAbs>(
+            client,
+            x_reshaped,
+            stage1_output.as_ref(),
+            1,
+            None,
+            (),
+        ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
+
+        // Stage 2: Reduce [M, 1] → [1, 1] using Max
+        let mut final_shape = stage1_shape.clone();
+        final_shape[0] = 1;
+        let max_output = TensorHandle::<R, P::EA>::empty(client, final_shape);
+
+        reduce::<R, (P::EA, P::EA), P::EA, Max>(
+            client,
+            stage1_output.as_ref(),
+            max_output.as_ref(),
+            0,
+            None,
+            (),
+        ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
+
+        intermediate_output = max_output;
+    } else {
+        // Single-stage reduction for small tensors
+        let max_shape = vec![1];
+        let max_output = TensorHandle::<R, P::EA>::empty(client, max_shape);
+
+        reduce::<R, (P::EA, P::EA), P::EA, MaxAbs>(
+            client,
+            x,
+            max_output.as_ref(),
+            0,
+            None,
+            (),
+        ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
+
+        intermediate_output = max_output;
+    }
+
+    Ok(intermediate_output)
 }
 
 /// Frobenius norm of a matrix: ||A||_F = sqrt(sum(A_ij^2))

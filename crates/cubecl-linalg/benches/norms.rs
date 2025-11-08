@@ -3,7 +3,7 @@
 //! These benchmarks test GPU-accelerated norm computations using CubeCL kernels.
 //! All operations use actual GPU kernels with #[cube] annotation.
 
-use cubecl_core::{prelude::*, benchmark::{Benchmark, TimingMethod, ProfileDuration}, future};
+use cubecl_core::{prelude::*, benchmark::{Benchmark, TimingMethod, ProfileDuration, BenchmarkComputations}, future};
 use cubecl_std::tensor::TensorHandle;
 use cubecl_random::random_uniform;
 use cubecl_linalg::{vector_norm_l2, vector_norm_inf, frobenius_norm, F32Precision};
@@ -170,7 +170,8 @@ fn run_l2_norm<R: Runtime>(device: R::Device, size: usize) {
     // L2 norm (OPTIMIZED): reduce_sum_squared (read) + sqrt (negligible)
     // Approximate: 1 read pass for reduce, minimal for sqrt
     let bytes = (size * 4) as f64; // f32 = 4 bytes, 1 read pass
-    let time_s = result.median.as_secs_f64();
+    let computed = BenchmarkComputations::new(&result);
+    let time_s = computed.median.as_secs_f64();
     let gb_per_s = bytes / time_s / 1e9;
     println!("  Bandwidth   {:.2} GB/s\n", gb_per_s);
 }
@@ -190,7 +191,8 @@ fn run_linf_norm<R: Runtime>(device: R::Device, size: usize) {
     // L-inf norm (OPTIMIZED): reduce_max_abs (read, fused abs)
     // Approximate: 1 read pass with inline abs
     let bytes = (size * 4) as f64; // f32 = 4 bytes, 1 read pass
-    let time_s = result.median.as_secs_f64();
+    let computed = BenchmarkComputations::new(&result);
+    let time_s = computed.median.as_secs_f64();
     let gb_per_s = bytes / time_s / 1e9;
     println!("  Bandwidth   {:.2} GB/s\n", gb_per_s);
 }
@@ -211,7 +213,8 @@ fn run_frobenius_norm<R: Runtime>(device: R::Device, rows: usize, cols: usize) {
     // Frobenius norm (OPTIMIZED): uses L2 pipeline (reduce_sum_squared + sqrt)
     let size = rows * cols;
     let bytes = (size * 4) as f64; // f32 = 4 bytes, 1 read pass
-    let time_s = result.median.as_secs_f64();
+    let computed = BenchmarkComputations::new(&result);
+    let time_s = computed.median.as_secs_f64();
     let gb_per_s = bytes / time_s / 1e9;
     println!("  Bandwidth   {:.2} GB/s\n", gb_per_s);
 }

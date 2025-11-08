@@ -14,6 +14,12 @@ use cubecl_reduce::{reduce};
 use cubecl_reduce::instructions::MaxAbs;
 use cubecl_std::tensor::TensorHandle;
 
+#[cfg(feature = "std")]
+use std::string::ToString;
+
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
+
 use crate::{LinalgPrecision, LinalgResult, LinalgError};
 use crate::kernels::{sqrt_kernel, SumSquared};
 

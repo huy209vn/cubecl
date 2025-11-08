@@ -19,6 +19,12 @@
 use cubecl_core::prelude::*;
 use cubecl_std::tensor::TensorHandle;
 
+#[cfg(feature = "std")]
+use std::string::ToString;
+
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
+
 use crate::{LinalgPrecision, LinalgResult, LinalgError};
 
 /// Side parameter for BLAS operations

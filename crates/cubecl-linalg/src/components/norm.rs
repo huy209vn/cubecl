@@ -50,9 +50,19 @@ where
 {
     use cubecl_reduce::instructions::Sum;
 
+    // Flatten the tensor to 1D for reduction (zero-copy view)
+    let total_elements: usize = x.shape.iter().product();
+    let x_flat = unsafe {
+        TensorHandleRef::<R>::from_raw_parts(
+            x.handle,
+            &[1],  // Contiguous stride
+            &[total_elements],  // Flattened shape
+            x.elem_size,
+        )
+    };
+
     // OPTIMIZATION: For large 1D tensors, cubecl-reduce uses only 1 cube when reducing to [1]
     // We reshape to 2D to enable parallel reduction across many cubes
-    let total_elements: usize = x.shape.iter().product();
 
     // Choose a good intermediate size for 2-stage reduction
     // Target: ~4K-8K intermediate elements for good parallelism
@@ -122,7 +132,7 @@ where
 
         reduce::<R, (P::EA, P::EA), P::EA, SumSquared>(
             client,
-            x,
+            x_flat,
             sum_output.as_ref(),
             0,
             None,
@@ -172,8 +182,18 @@ where
 {
     use cubecl_reduce::instructions::Max;
 
-    // OPTIMIZATION: Use 2-stage reduction for large tensors to enable parallelism
+    // Flatten the tensor to 1D for reduction (zero-copy view)
     let total_elements: usize = x.shape.iter().product();
+    let x_flat = unsafe {
+        TensorHandleRef::<R>::from_raw_parts(
+            x.handle,
+            &[1],  // Contiguous stride
+            &[total_elements],  // Flattened shape
+            x.elem_size,
+        )
+    };
+
+    // OPTIMIZATION: Use 2-stage reduction for large tensors to enable parallelism
 
     let intermediate_size = if total_elements > 1_000_000 {
         let sqrt_n = (total_elements as f64).sqrt().ceil() as usize;
@@ -236,7 +256,7 @@ where
 
         reduce::<R, (P::EA, P::EA), P::EA, MaxAbs>(
             client,
-            x,
+            x_flat,
             max_output.as_ref(),
             0,
             None,

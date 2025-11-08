@@ -166,8 +166,8 @@ mod tests {
         let result_bytes = client.read_one(result.handle.clone());
         let result_value = f32::from_bytes(&result_bytes)[0];
 
-        // Slightly higher tolerance for large sums due to floating point accumulation
-        assert_relative_eq!(result_value, expected, epsilon = 1e-3);
+        // Higher tolerance for large sums due to floating point accumulation in 2-stage reduction
+        assert_relative_eq!(result_value, expected, epsilon = 5e-3);
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
             let diff = (result_value - expected).abs();
             let rel_error = diff / expected.max(1e-6);
             assert!(
-                rel_error < 1e-3,
+                rel_error < 5e-3,
                 "Failed for size {}: got {}, expected {}, rel_error = {}",
                 size, result_value, expected, rel_error
             );

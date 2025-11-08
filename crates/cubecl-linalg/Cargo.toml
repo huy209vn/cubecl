@@ -88,3 +88,7 @@ harness = false
 [[bench]]
 name = "simple_norms"
 harness = false
+
+[[bench]]
+name = "norms_simple"
+harness = false

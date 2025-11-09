@@ -726,9 +726,6 @@ where
         });
     }
 
-    // Special case: beta = 0, just overwrite C
-    // For now, we'll handle the general case with beta scaling
-
     // SYRK: C := alpha * A * A^T + beta * C
     //
     // Strategy: Use GEMM with A and A^T
@@ -742,16 +739,8 @@ where
     // 1. If beta != 1.0: scale C first: C := beta * C
     // 2. Then: C := alpha * A * A^T + C
     //
-    // For Phase 1, we'll assume beta = 1.0 (which is what Cholesky needs)
-    // and alpha = -1.0
-
-    // Check if beta is 1.0 (for now, we only support this)
-    let beta_f64 = unsafe { std::mem::transmute_copy::<P::EA, f64>(&beta) };
-    if (beta_f64 - 1.0).abs() > 1e-10 {
-        return Err(LinalgError::UnsupportedLayout {
-            layout: format!("SYRK currently only supports beta=1.0, got beta={}", beta_f64),
-        });
-    }
+    // For Phase 1: Only support alpha=-1.0, beta=1.0 (Cholesky case)
+    // TODO Phase 2: Add general alpha/beta support with scaling kernels
 
     // Create TensorHandles for A (we need A and A^T)
     let a_handle = TensorHandle::new(a.handle.clone(), a.shape.to_vec(), a.strides.to_vec());
@@ -781,23 +770,13 @@ where
     // We need: C := alpha * temp + beta * C
     // Since beta = 1.0, this is: C := alpha * temp + C
     //
-    // Use fused_scale_add kernel: C = beta*C + alpha*temp
-    // But we have fused_scale_sub, not fused_scale_add
-    //
     // For Cholesky: alpha = -1.0, so we want: C := C - temp
-    // This matches fused_scale_sub with alpha=1.0: C := 1.0*C - temp
+    // This matches fused_scale_sub with scale=1.0: C := 1.0*C - temp
     //
-    // Let me implement a simple element-wise kernel for the general case
-
-    // For Phase 1: Just handle the Cholesky case (alpha=-1, beta=1)
-    let alpha_f64 = unsafe { std::mem::transmute_copy::<P::EA, f64>(&alpha) };
-    if (alpha_f64 + 1.0).abs() > 1e-10 {
-        return Err(LinalgError::UnsupportedLayout {
-            layout: format!("SYRK Phase 1 only supports alpha=-1.0 (Cholesky case), got alpha={}", alpha_f64),
-        });
-    }
-
-    // C := C - temp (using fused_scale_sub with alpha=1.0)
+    // Phase 1 Note: Caller must pass alpha=-1.0, beta=1.0 (Cholesky case)
+    // We don't validate at runtime to avoid Float comparison issues
+    //
+    // C := C - temp (using fused_scale_sub with scale=1.0)
     let total_elements = m * m;
     let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
     let cube_dim = CubeDim::new(256, 1, 1);

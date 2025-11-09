@@ -380,8 +380,8 @@ where
             client,
             cube_count,
             cube_dim,
-            b.as_tensor_arg(0),
-            output.as_ref().as_tensor_arg(0),
+            b.as_tensor_arg(1),
+            output.as_ref().as_tensor_arg(1),
         );
     }
 
@@ -437,8 +437,8 @@ where
                 client,
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new(n as u32, 1, 1),
-                a.as_tensor_arg(0),
-                b.as_tensor_arg(0),
+                a.as_tensor_arg(1),
+                b.as_tensor_arg(1),
                 ScalarArg::new(alpha_ew),
             );
         }
@@ -575,8 +575,8 @@ where
             client,
             cube_count,
             cube_dim,
-            b2.as_tensor_arg(0),
-            temp.as_ref().as_tensor_arg(0),
+            b2.as_tensor_arg(1),
+            temp.as_ref().as_tensor_arg(1),
             ScalarArg::new(alpha_ew),
         );
     }

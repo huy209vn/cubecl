@@ -429,8 +429,10 @@ where
             });
         }
 
-        // Convert alpha from EA to EW using host-side conversion
-        let alpha_ew: P::EW = num_traits::cast(alpha).expect("Failed to convert alpha type");
+        // For all current precision types, EA and EW are the same (f32/f32, f64/f64, etc.)
+        // Use a transmute-style conversion via bit representation
+        // Safety: EA and EW are always the same size and representation for valid precision types
+        let alpha_bits = unsafe { std::mem::transmute_copy::<P::EA, P::EW>(&alpha) };
 
         unsafe {
             small_trsm_left_lower_kernel::launch::<P::EW, R>(
@@ -439,7 +441,7 @@ where
                 CubeDim::new(n as u32, 1, 1),
                 a.as_tensor_arg(1),
                 b.as_tensor_arg(1),
-                ScalarArg::new(alpha_ew),
+                ScalarArg::new(alpha_bits),
             );
         }
 
@@ -567,8 +569,10 @@ where
     let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
     let cube_dim = CubeDim::new(256, 1, 1);
 
-    // Convert alpha from EA to EW using host-side conversion
-    let alpha_ew: P::EW = num_traits::cast(alpha).expect("Failed to convert alpha type");
+    // For all current precision types, EA and EW are the same (f32/f32, f64/f64, etc.)
+    // Use a transmute-style conversion via bit representation
+    // Safety: EA and EW are always the same size and representation for valid precision types
+    let alpha_bits = unsafe { std::mem::transmute_copy::<P::EA, P::EW>(&alpha) };
 
     unsafe {
         fused_scale_sub_kernel::launch::<P::EW, R>(
@@ -577,7 +581,7 @@ where
             cube_dim,
             b2.as_tensor_arg(1),
             temp.as_ref().as_tensor_arg(1),
-            ScalarArg::new(alpha_ew),
+            ScalarArg::new(alpha_bits),
         );
     }
 

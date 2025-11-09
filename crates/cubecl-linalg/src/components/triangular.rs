@@ -429,8 +429,8 @@ where
             });
         }
 
-        // Convert alpha from EA to EW
-        let alpha_ew = P::EW::cast_from(alpha);
+        // Convert alpha from EA to EW using host-side conversion
+        let alpha_ew: P::EW = num_traits::cast(alpha).expect("Failed to convert alpha type");
 
         unsafe {
             small_trsm_left_lower_kernel::launch::<P::EW, R>(
@@ -567,8 +567,8 @@ where
     let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
     let cube_dim = CubeDim::new(256, 1, 1);
 
-    // Convert alpha from EA to EW
-    let alpha_ew = P::EW::cast_from(alpha);
+    // Convert alpha from EA to EW using host-side conversion
+    let alpha_ew: P::EW = num_traits::cast(alpha).expect("Failed to convert alpha type");
 
     unsafe {
         fused_scale_sub_kernel::launch::<P::EW, R>(

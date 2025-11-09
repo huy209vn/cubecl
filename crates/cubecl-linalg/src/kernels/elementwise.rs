@@ -85,3 +85,17 @@ pub fn copy_kernel<F: Float>(input: &Tensor<F>, output: &mut Tensor<F>) {
         output[ABSOLUTE_POS] = input[ABSOLUTE_POS];
     }
 }
+
+/// Fused AXPY variant: y[i] = alpha * y[i] - x[i]
+///
+/// Used in TRSM for: B2 = alpha * B2 - L21 * X1
+#[cube(launch)]
+pub fn fused_scale_sub_kernel<F: Float>(
+    y: &mut Tensor<F>,
+    x: &Tensor<F>,
+    alpha: F,
+) {
+    if ABSOLUTE_POS < y.len() {
+        y[ABSOLUTE_POS] = alpha * y[ABSOLUTE_POS] - x[ABSOLUTE_POS];
+    }
+}

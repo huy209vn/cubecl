@@ -15,9 +15,18 @@
 //! - Small triangular ops on diagonal panels
 //! - Large GEMM updates on trailing blocks
 //! - Good GPU arithmetic intensity
+//!
+//! ## TRSM Implementation
+//!
+//! Uses recursive algorithm that divides matrices by 2 until reaching base case:
+//! - Base case (N ≤ threshold): Direct GPU kernel
+//! - Recursive case: Small solve → GEMM update → Recurse
+//! - Converts 90%+ of work to highly-optimized GEMM operations
 
+use cubecl_core as cubecl;
 use cubecl_core::prelude::*;
 use cubecl_std::tensor::TensorHandle;
+use cubecl_matmul::{self as matmul, MatmulInputHandle, Strategy as MatmulStrategy};
 
 #[cfg(feature = "std")]
 use std::string::ToString;
@@ -26,6 +35,7 @@ use std::string::ToString;
 use alloc::string::ToString;
 
 use crate::{LinalgPrecision, LinalgResult, LinalgError};
+use crate::kernels::fused_scale_sub_kernel;
 
 /// Side parameter for BLAS operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +73,52 @@ pub enum Diagonal {
     NonUnit,
     /// Assume diagonal elements are 1 (unit triangular)
     Unit,
+}
+
+/// TRSM auto-tuning configuration
+///
+/// Controls the recursive blocking strategy and base kernel parameters.
+#[derive(Debug, Clone, Copy)]
+pub struct TrsmConfig {
+    /// Base case threshold (stop recursion when N ≤ threshold)
+    ///
+    /// Typical values:
+    /// - Small/old GPUs: 32-64
+    /// - Modern GPUs (A100, H100): 64-128
+    pub base_threshold: usize,
+
+    /// Work group size for base kernel (threads per block)
+    pub workgroup_size_x: u32,
+    pub workgroup_size_y: u32,
+}
+
+impl Default for TrsmConfig {
+    fn default() -> Self {
+        Self {
+            base_threshold: 64,  // Good default for most modern GPUs
+            workgroup_size_x: 16,
+            workgroup_size_y: 16,
+        }
+    }
+}
+
+impl TrsmConfig {
+    /// Auto-tune configuration based on problem size
+    pub fn auto_tune(problem_size: usize) -> Self {
+        // Heuristic-based auto-tuning
+        // TODO: Profile-guided optimization for specific hardware
+        let base_threshold = match problem_size {
+            0..=256 => 32,
+            257..=1024 => 64,
+            _ => 128,
+        };
+
+        Self {
+            base_threshold,
+            workgroup_size_x: 16,
+            workgroup_size_y: 16,
+        }
+    }
 }
 
 /// Upper triangular view (zero-copy)
@@ -136,6 +192,55 @@ where
     })
 }
 
+/// Small triangular solve kernel for Left-Lower-NoTrans-NonUnit
+///
+/// Solves L * X = alpha * B where L is lower triangular.
+/// This is the base case for the recursive TRSM algorithm.
+///
+/// Parallelism strategy: Parallel over RHS columns (nrhs dimension),
+/// sequential within each column due to data dependencies.
+#[cube(launch)]
+fn small_trsm_left_lower_kernel<F: Float>(
+    a: &Tensor<F>,       // Lower triangular matrix [k, k]
+    b: &mut Tensor<F>,   // RHS matrix [k, nrhs]
+    alpha: F,
+) {
+    // Each thread handles one column of B
+    // Solve: L * X[:, col_idx] = alpha * B[:, col_idx]
+
+    let k = a.shape(0);
+    let nrhs = b.shape(1);
+    let col_idx = ABSOLUTE_POS;
+
+    if col_idx < nrhs {
+        // Scale by alpha
+        for i in 0..k {
+            b[i * nrhs + col_idx] = alpha * b[i * nrhs + col_idx];
+        }
+
+        // Forward substitution
+        for i in 0..k {
+            let mut x_i = b[i * nrhs + col_idx];
+
+            // Subtract contributions from previous elements: x_i -= sum(L[i,j] * x_j)
+            for j in 0..i {
+                let l_ij = a[i * k + j];
+                let x_j = b[j * nrhs + col_idx];
+                x_i = x_i - l_ij * x_j;
+            }
+
+            // Divide by diagonal: x_i /= L[i,i]
+            let l_ii = a[i * k + i];
+            x_i = x_i / l_ii;
+
+            b[i * nrhs + col_idx] = x_i;
+        }
+    }
+}
+
+// TODO: Add variants for other TRSM cases (Upper, Trans, Right, Unit diagonal)
+// For Phase 1, Left-Lower-NoTrans is sufficient for Cholesky
+
 /// Triangular solve: op(A) * X = alpha * B  or  X * op(A) = alpha * B
 ///
 /// Solves a triangular system of equations using a blocked algorithm
@@ -188,31 +293,277 @@ where
 /// )?;
 /// ```
 pub fn trsm<R: Runtime, P: LinalgPrecision>(
-    _client: &ComputeClient<R::Server>,
-    _side: Side,
-    _uplo: Triangle,
-    _trans: Transpose,
-    _diag: Diagonal,
-    _alpha: P::EA,
-    _a: TensorHandleRef<R>,
-    _b: TensorHandleRef<R>,
+    client: &ComputeClient<R::Server>,
+    side: Side,
+    uplo: Triangle,
+    trans: Transpose,
+    diag: Diagonal,
+    alpha: P::EA,
+    a: TensorHandleRef<R>,
+    b: TensorHandleRef<R>,
 ) -> LinalgResult<TensorHandle<R, P::EW>>
 where
     P::EW: Float,
     P::EA: Float,
 {
-    // TODO: Implement blocked TRSM
-    // Key steps:
-    // 1. Get auto-tuned block size
-    // 2. Partition matrices into panels (size NB)
-    // 3. For each panel:
-    //    a. Small triangular solve on diagonal panel
-    //    b. GEMM update on remaining blocks
-    // 4. Handle batching by looping over batch dims
+    trsm_with_config::<R, P>(client, side, uplo, trans, diag, alpha, a, b, None)
+}
 
-    Err(LinalgError::UnsupportedLayout {
-        layout: "trsm not yet implemented".to_string(),
-    })
+/// TRSM with custom configuration (for testing/tuning)
+pub fn trsm_with_config<R: Runtime, P: LinalgPrecision>(
+    client: &ComputeClient<R::Server>,
+    side: Side,
+    uplo: Triangle,
+    trans: Transpose,
+    diag: Diagonal,
+    alpha: P::EA,
+    a: TensorHandleRef<R>,
+    b: TensorHandleRef<R>,
+    config: Option<TrsmConfig>,
+) -> LinalgResult<TensorHandle<R, P::EW>>
+where
+    P::EW: Float,
+    P::EA: Float,
+{
+    // Validate inputs
+    let a_shape = &a.shape;
+    let b_shape = &b.shape;
+
+    // For now, only support 2D matrices (no batching)
+    // TODO: Add batching support in Phase 3
+    if a_shape.len() != 2 || b_shape.len() != 2 {
+        return Err(LinalgError::UnsupportedLayout {
+            layout: format!("TRSM only supports 2D matrices, got A: {:?}, B: {:?}", a_shape, b_shape),
+        });
+    }
+
+    let k = a_shape[0];
+    if a_shape[1] != k {
+        return Err(LinalgError::UnsupportedLayout {
+            layout: format!("Matrix A must be square, got shape {:?}", a_shape),
+        });
+    }
+
+    let (m, n) = (b_shape[0], b_shape[1]);
+
+    // Validate dimensions match
+    match side {
+        Side::Left => {
+            if k != m {
+                return Err(LinalgError::UnsupportedLayout {
+                    layout: format!("Dimension mismatch: A is {}x{}, B is {}x{}", k, k, m, n),
+                });
+            }
+        }
+        Side::Right => {
+            if k != n {
+                return Err(LinalgError::UnsupportedLayout {
+                    layout: format!("Dimension mismatch: A is {}x{}, B is {}x{}", k, k, m, n),
+                });
+            }
+        }
+    }
+
+    // Get or create config
+    let config = config.unwrap_or_else(|| TrsmConfig::auto_tune(k));
+
+    // Create output tensor (copy of B, will be modified in-place conceptually)
+    let output = TensorHandle::<R, P::EW>::empty(client, b_shape.to_vec());
+
+    // Copy B to output
+    client.copy(&b.handle, &output.handle);
+
+    // Call recursive solver
+    trsm_recursive(
+        client,
+        side,
+        uplo,
+        trans,
+        diag,
+        alpha,
+        a,
+        &output.as_ref(),
+        config,
+    )?;
+
+    Ok(output)
+}
+
+/// Recursive TRSM implementation
+fn trsm_recursive<R: Runtime, P: LinalgPrecision>(
+    client: &ComputeClient<R::Server>,
+    side: Side,
+    uplo: Triangle,
+    trans: Transpose,
+    diag: Diagonal,
+    alpha: P::EA,
+    a: TensorHandleRef<R>,
+    b: TensorHandleRef<R>,  // Modified in-place
+    config: TrsmConfig,
+) -> LinalgResult<()>
+where
+    P::EW: Float,
+    P::EA: Float,
+{
+    let k = a.shape[0];
+    let (m, n) = (b.shape[0], b.shape[1]);
+
+    // Base case: use direct kernel
+    if k <= config.base_threshold {
+        // For Phase 1, only support Left-Lower-NoTrans-NonUnit
+        if side != Side::Left || uplo != Triangle::Lower || trans != Transpose::NoTrans || diag != Diagonal::NonUnit {
+            return Err(LinalgError::UnsupportedLayout {
+                layout: format!("Base kernel only supports Left-Lower-NoTrans-NonUnit, got {:?}-{:?}-{:?}-{:?}", side, uplo, trans, diag),
+            });
+        }
+
+        unsafe {
+            small_trsm_left_lower_kernel::launch::<P::EW, R>(
+                client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(n as u32, 1, 1),
+                a.as_tensor_arg(0),
+                b.as_tensor_arg(0),
+                ScalarArg::new(alpha),
+            );
+        }
+
+        return Ok(());
+    }
+
+    // Recursive case: partition and solve
+    // For now, only implement Left-Lower-NoTrans (most common for Cholesky)
+    // TODO: Implement other 7 variants
+
+    if side != Side::Left || uplo != Triangle::Lower || trans != Transpose::NoTrans {
+        return Err(LinalgError::UnsupportedLayout {
+            layout: format!("TRSM recursive case only supports Left-Lower-NoTrans for now, got {:?}-{:?}-{:?}", side, uplo, trans),
+        });
+    }
+
+    // Partition: divide k by 2 (recursive halving strategy)
+    let k1 = k / 2;
+    let k2 = k - k1;
+
+    // L = [L11   0 ]   B = [B1]   X = [X1]
+    //     [L21  L22]       [B2]       [X2]
+    //
+    // Solve: L * X = alpha * B
+    // 1. L11 * X1 = alpha * B1  (recursive)
+    // 2. B2 := alpha * B2 - L21 * X1  (GEMM)
+    // 3. L22 * X2 = B2  (recursive, alpha=1 since B2 already scaled)
+
+    // Create views for submatrices
+    // L11: a[0:k1, 0:k1]
+    let l11 = unsafe {
+        TensorHandleRef::<R>::from_raw_parts(
+            a.handle,
+            &a.strides[..],
+            &[k1, k1],
+            a.elem_size,
+        )
+    };
+
+    // L21: a[k1:k, 0:k1]
+    let l21_offset = k1 * a.strides[0];
+    let l21 = unsafe {
+        TensorHandleRef::<R>::from_raw_parts(
+            &a.handle.clone().offset_start(l21_offset),
+            &a.strides[..],
+            &[k2, k1],
+            a.elem_size,
+        )
+    };
+
+    // L22: a[k1:k, k1:k]
+    let l22_offset = k1 * a.strides[0] + k1 * a.strides[1];
+    let l22 = unsafe {
+        TensorHandleRef::<R>::from_raw_parts(
+            &a.handle.clone().offset_start(l22_offset),
+            &a.strides[..],
+            &[k2, k2],
+            a.elem_size,
+        )
+    };
+
+    // B1: b[0:k1, :]
+    let b1 = unsafe {
+        TensorHandleRef::<R>::from_raw_parts(
+            b.handle,
+            &b.strides[..],
+            &[k1, n],
+            b.elem_size,
+        )
+    };
+
+    // B2: b[k1:k, :]
+    let b2_offset = k1 * b.strides[0];
+    let b2 = unsafe {
+        TensorHandleRef::<R>::from_raw_parts(
+            &b.handle.clone().offset_start(b2_offset),
+            &b.strides[..],
+            &[k2, n],
+            b.elem_size,
+        )
+    };
+
+    // Step 1: Solve L11 * X1 = alpha * B1
+    trsm_recursive::<R, P>(client, side, uplo, trans, diag, alpha, l11, b1, config)?;
+
+    // Step 2: Update B2 := alpha * B2 - L21 * X1
+    // This is: B2 = alpha * B2 - L21 * B1
+    //
+    // We compute:
+    // 1. temp = L21 * B1  (GEMM)
+    // 2. B2 = alpha * B2 - temp  (fused element-wise)
+
+    // Temp result: [k2, n]
+    let temp_shape = vec![k2, n];
+    let temp = TensorHandle::<R, P::EW>::empty(client, temp_shape.clone());
+
+    // GEMM: temp = L21 * B1
+    let l21_handle = TensorHandle::new(l21.shape.to_vec(), l21.strides.to_vec(), l21.handle.clone());
+    let b1_handle = TensorHandle::new(b1.shape.to_vec(), b1.strides.to_vec(), b1.handle.clone());
+
+    let _ = matmul::launch::<R, P>(
+        &MatmulStrategy::Auto,
+        client,
+        MatmulInputHandle::Unquantized(l21_handle),
+        MatmulInputHandle::Unquantized(b1_handle),
+        temp.clone(),
+    );
+
+    // Fused: B2 = alpha * B2 - temp
+    let b2_handle = TensorHandle::new(b2.shape.to_vec(), b2.strides.to_vec(), b2.handle.clone());
+    let total_elements = k2 * n;
+    let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
+    let cube_dim = CubeDim::new(256, 1, 1);
+
+    unsafe {
+        fused_scale_sub_kernel::launch::<P::EW, R>(
+            client,
+            cube_count,
+            cube_dim,
+            b2_handle.as_tensor_arg(0),
+            temp.as_tensor_arg(0),
+            ScalarArg::new(alpha),
+        );
+    }
+
+    // Step 3: Solve L22 * X2 = B2 (recursive, alpha=1 since B2 already scaled/updated)
+    trsm_recursive::<R, P>(
+        client,
+        side,
+        uplo,
+        trans,
+        diag,
+        P::EA::from_i32(1),  // alpha = 1.0
+        l22,
+        b2,
+        config,
+    )?;
+
+    Ok(())
 }
 
 /// Triangular matrix multiply: B = alpha * op(A) * B  or  B = alpha * B * op(A)

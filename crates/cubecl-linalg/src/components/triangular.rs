@@ -35,7 +35,7 @@ use std::string::ToString;
 use alloc::string::ToString;
 
 use crate::{LinalgPrecision, LinalgResult, LinalgError};
-use crate::kernels::fused_scale_sub_kernel;
+use crate::kernels::{fused_scale_sub_kernel, copy_kernel};
 
 /// Side parameter for BLAS operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,7 +303,7 @@ pub fn trsm<R: Runtime, P: LinalgPrecision>(
     b: TensorHandleRef<R>,
 ) -> LinalgResult<TensorHandle<R, P::EW>>
 where
-    P::EW: Float,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
     P::EA: Float,
 {
     trsm_with_config::<R, P>(client, side, uplo, trans, diag, alpha, a, b, None)
@@ -322,7 +322,7 @@ pub fn trsm_with_config<R: Runtime, P: LinalgPrecision>(
     config: Option<TrsmConfig>,
 ) -> LinalgResult<TensorHandle<R, P::EW>>
 where
-    P::EW: Float,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
     P::EA: Float,
 {
     // Validate inputs
@@ -370,11 +370,23 @@ where
     // Create output tensor (copy of B, will be modified in-place conceptually)
     let output = TensorHandle::<R, P::EW>::empty(client, b_shape.to_vec());
 
-    // Copy B to output
-    client.copy(&b.handle, &output.handle);
+    // Copy B to output using copy_kernel
+    let total_elements: usize = b_shape.iter().product();
+    let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
+    let cube_dim = CubeDim::new(256, 1, 1);
+
+    unsafe {
+        copy_kernel::launch::<P::EW, R>(
+            client,
+            cube_count,
+            cube_dim,
+            b.as_tensor_arg(0),
+            output.as_ref().as_tensor_arg(0),
+        );
+    }
 
     // Call recursive solver
-    trsm_recursive(
+    trsm_recursive::<R, P>(
         client,
         side,
         uplo,
@@ -382,7 +394,7 @@ where
         diag,
         alpha,
         a,
-        &output.as_ref(),
+        output.as_ref(),
         config,
     )?;
 
@@ -402,7 +414,7 @@ fn trsm_recursive<R: Runtime, P: LinalgPrecision>(
     config: TrsmConfig,
 ) -> LinalgResult<()>
 where
-    P::EW: Float,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
     P::EA: Float,
 {
     let k = a.shape[0];
@@ -417,6 +429,9 @@ where
             });
         }
 
+        // Convert alpha from EA to EW
+        let alpha_ew = P::EW::cast_from(alpha);
+
         unsafe {
             small_trsm_left_lower_kernel::launch::<P::EW, R>(
                 client,
@@ -424,7 +439,7 @@ where
                 CubeDim::new(n as u32, 1, 1),
                 a.as_tensor_arg(0),
                 b.as_tensor_arg(0),
-                ScalarArg::new(alpha),
+                ScalarArg::new(alpha_ew),
             );
         }
 
@@ -454,34 +469,43 @@ where
     // 3. L22 * X2 = B2  (recursive, alpha=1 since B2 already scaled)
 
     // Create views for submatrices
+    // Create shape arrays with longer lifetime
+    let l11_shape = vec![k1, k1];
+    let l21_shape = vec![k2, k1];
+    let l22_shape = vec![k2, k2];
+    let b1_shape = vec![k1, n];
+    let b2_shape = vec![k2, n];
+
     // L11: a[0:k1, 0:k1]
     let l11 = unsafe {
         TensorHandleRef::<R>::from_raw_parts(
             a.handle,
             &a.strides[..],
-            &[k1, k1],
+            &l11_shape,
             a.elem_size,
         )
     };
 
     // L21: a[k1:k, 0:k1]
-    let l21_offset = k1 * a.strides[0];
+    let l21_offset = (k1 * a.strides[0]) as u64;
+    let l21_handle = a.handle.clone().offset_start(l21_offset);
     let l21 = unsafe {
         TensorHandleRef::<R>::from_raw_parts(
-            &a.handle.clone().offset_start(l21_offset),
+            &l21_handle,
             &a.strides[..],
-            &[k2, k1],
+            &l21_shape,
             a.elem_size,
         )
     };
 
     // L22: a[k1:k, k1:k]
-    let l22_offset = k1 * a.strides[0] + k1 * a.strides[1];
+    let l22_offset = (k1 * a.strides[0] + k1 * a.strides[1]) as u64;
+    let l22_handle = a.handle.clone().offset_start(l22_offset);
     let l22 = unsafe {
         TensorHandleRef::<R>::from_raw_parts(
-            &a.handle.clone().offset_start(l22_offset),
+            &l22_handle,
             &a.strides[..],
-            &[k2, k2],
+            &l22_shape,
             a.elem_size,
         )
     };
@@ -491,18 +515,19 @@ where
         TensorHandleRef::<R>::from_raw_parts(
             b.handle,
             &b.strides[..],
-            &[k1, n],
+            &b1_shape,
             b.elem_size,
         )
     };
 
     // B2: b[k1:k, :]
-    let b2_offset = k1 * b.strides[0];
+    let b2_offset = (k1 * b.strides[0]) as u64;
+    let b2_handle = b.handle.clone().offset_start(b2_offset);
     let b2 = unsafe {
         TensorHandleRef::<R>::from_raw_parts(
-            &b.handle.clone().offset_start(b2_offset),
+            &b2_handle,
             &b.strides[..],
-            &[k2, n],
+            &b2_shape,
             b.elem_size,
         )
     };
@@ -518,35 +543,41 @@ where
     // 2. B2 = alpha * B2 - temp  (fused element-wise)
 
     // Temp result: [k2, n]
+    // Use the correct output type for matmul (AccG = Acc::Global)
+    type AccG<MP> = cubecl_matmul::components::AccG<MP>;
     let temp_shape = vec![k2, n];
-    let temp = TensorHandle::<R, P::EW>::empty(client, temp_shape.clone());
+    let temp = TensorHandle::<R, AccG<P::EW>>::empty(client, temp_shape.clone());
 
     // GEMM: temp = L21 * B1
-    let l21_handle = TensorHandle::new(l21.shape.to_vec(), l21.strides.to_vec(), l21.handle.clone());
-    let b1_handle = TensorHandle::new(b1.shape.to_vec(), b1.strides.to_vec(), b1.handle.clone());
+    // Fix TensorHandle::new argument order: (handle, shape, strides)
+    let l21_handle = TensorHandle::new(l21.handle.clone(), l21.shape.to_vec(), l21.strides.to_vec());
+    let b1_handle = TensorHandle::new(b1.handle.clone(), b1.shape.to_vec(), b1.strides.to_vec());
 
-    let _ = matmul::launch::<R, P>(
+    // Use P::EW as the MatmulPrecision type
+    let _ = matmul::launch::<R, P::EW>(
         &MatmulStrategy::Auto,
         client,
-        MatmulInputHandle::Unquantized(l21_handle),
-        MatmulInputHandle::Unquantized(b1_handle),
+        MatmulInputHandle::Normal(l21_handle),
+        MatmulInputHandle::Normal(b1_handle),
         temp.clone(),
     );
 
     // Fused: B2 = alpha * B2 - temp
-    let b2_handle = TensorHandle::new(b2.shape.to_vec(), b2.strides.to_vec(), b2.handle.clone());
     let total_elements = k2 * n;
     let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
     let cube_dim = CubeDim::new(256, 1, 1);
+
+    // Convert alpha from EA to EW
+    let alpha_ew = P::EW::cast_from(alpha);
 
     unsafe {
         fused_scale_sub_kernel::launch::<P::EW, R>(
             client,
             cube_count,
             cube_dim,
-            b2_handle.as_tensor_arg(0),
-            temp.as_tensor_arg(0),
-            ScalarArg::new(alpha),
+            b2.as_tensor_arg(0),
+            temp.as_ref().as_tensor_arg(0),
+            ScalarArg::new(alpha_ew),
         );
     }
 
@@ -557,7 +588,7 @@ where
         uplo,
         trans,
         diag,
-        P::EA::from_i32(1),  // alpha = 1.0
+        P::EA::from_int(1),  // alpha = 1.0
         l22,
         b2,
         config,

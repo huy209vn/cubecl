@@ -674,12 +674,12 @@ mod tests {
         // Create L matrix (lower triangular)
         let l_data = vec![2.0_f32, 0.0, 3.0, 1.0];
         let l = client.create(bytemuck::cast_slice(&l_data));
-        let l_handle = TensorHandle::new(l, vec![2, 2], vec![2, 1]);
+        let l_handle = TensorHandle::<CpuRuntime, f32>::new(l, vec![2, 2], vec![2, 1]);
 
         // Create B vector
         let b_data = vec![4.0_f32, 5.0];
         let b = client.create(bytemuck::cast_slice(&b_data));
-        let b_handle = TensorHandle::new(b, vec![2, 1], vec![1, 1]);
+        let b_handle = TensorHandle::<CpuRuntime, f32>::new(b, vec![2, 1], vec![1, 1]);
 
         // Solve L * X = B
         let result = trsm::<CpuRuntime, crate::F32Precision>(
@@ -709,12 +709,12 @@ mod tests {
         // Identity matrix
         let l_data = vec![1.0_f32, 0.0, 0.0, 1.0];
         let l = client.create(bytemuck::cast_slice(&l_data));
-        let l_handle = TensorHandle::new(l, vec![2, 2], vec![2, 1]);
+        let l_handle = TensorHandle::<CpuRuntime, f32>::new(l, vec![2, 2], vec![2, 1]);
 
         // RHS
         let b_data = vec![3.0_f32, 7.0];
         let b = client.create(bytemuck::cast_slice(&b_data));
-        let b_handle = TensorHandle::new(b, vec![2, 1], vec![1, 1]);
+        let b_handle = TensorHandle::<CpuRuntime, f32>::new(b, vec![2, 1], vec![1, 1]);
 
         // Solve
         let result = trsm::<CpuRuntime, crate::F32Precision>(
@@ -746,12 +746,12 @@ mod tests {
             1.0,     2.0, 1.0, 5.0,
         ];
         let l = client.create(bytemuck::cast_slice(&l_data));
-        let l_handle = TensorHandle::new(l, vec![4, 4], vec![4, 1]);
+        let l_handle = TensorHandle::<CpuRuntime, f32>::new(l, vec![4, 4], vec![4, 1]);
 
         // RHS vector
         let b_data = vec![4.0_f32, 9.0, 16.0, 25.0];
         let b = client.create(bytemuck::cast_slice(&b_data));
-        let b_handle = TensorHandle::new(b, vec![4, 1], vec![1, 1]);
+        let b_handle = TensorHandle::<CpuRuntime, f32>::new(b, vec![4, 1], vec![1, 1]);
 
         // Solve
         let result = trsm::<CpuRuntime, crate::F32Precision>(
@@ -777,12 +777,12 @@ mod tests {
         // 2x2 lower triangular
         let l_data = vec![2.0_f32, 0.0, 3.0, 1.0];
         let l = client.create(bytemuck::cast_slice(&l_data));
-        let l_handle = TensorHandle::new(l, vec![2, 2], vec![2, 1]);
+        let l_handle = TensorHandle::<CpuRuntime, f32>::new(l, vec![2, 2], vec![2, 1]);
 
         // 2x3 RHS matrix (3 different right-hand sides)
         let b_data = vec![4.0_f32, 8.0, 12.0, 5.0, 11.0, 15.0];
         let b = client.create(bytemuck::cast_slice(&b_data));
-        let b_handle = TensorHandle::new(b, vec![2, 3], vec![3, 1]);
+        let b_handle = TensorHandle::<CpuRuntime, f32>::new(b, vec![2, 3], vec![3, 1]);
 
         // Solve L * X = B
         let result = trsm::<CpuRuntime, crate::F32Precision>(
@@ -807,11 +807,11 @@ mod tests {
 
         let l_data = vec![2.0_f32, 0.0, 3.0, 1.0];
         let l = client.create(bytemuck::cast_slice(&l_data));
-        let l_handle = TensorHandle::new(l, vec![2, 2], vec![2, 1]);
+        let l_handle = TensorHandle::<CpuRuntime, f32>::new(l, vec![2, 2], vec![2, 1]);
 
         let b_data = vec![4.0_f32, 5.0];
         let b = client.create(bytemuck::cast_slice(&b_data));
-        let b_handle = TensorHandle::new(b, vec![2, 1], vec![1, 1]);
+        let b_handle = TensorHandle::<CpuRuntime, f32>::new(b, vec![2, 1], vec![1, 1]);
 
         // Solve L * X = 2.0 * B
         let result = trsm::<CpuRuntime, crate::F32Precision>(
@@ -837,11 +837,11 @@ mod tests {
 
         let u_data = vec![2.0_f32, 3.0, 0.0, 1.0];
         let u = client.create(bytemuck::cast_slice(&u_data));
-        let u_handle = TensorHandle::new(u, vec![2, 2], vec![2, 1]);
+        let u_handle = TensorHandle::<CpuRuntime, f32>::new(u, vec![2, 2], vec![2, 1]);
 
         let b_data = vec![4.0_f32, 5.0];
         let b = client.create(bytemuck::cast_slice(&b_data));
-        let b_handle = TensorHandle::new(b, vec![2, 1], vec![1, 1]);
+        let b_handle = TensorHandle::<CpuRuntime, f32>::new(b, vec![2, 1], vec![1, 1]);
 
         let _ = trsm::<CpuRuntime, crate::F32Precision>(
             &client,

@@ -1493,8 +1493,15 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
     axes: &[usize],
     vectorization: u8,
 ) -> bool {
+    if std::env::var("CUBECL_DEBUG").is_ok() {
+        eprintln!("[DEBUG] match_pattern_rank4: axes={:?}", axes);
+    }
+
     match axes {
         [0, 2, 3, 1] => {
+            if std::env::var("CUBECL_DEBUG").is_ok() {
+                eprintln!("[DEBUG] ✓ MATCHED Channel Shuffle pattern [0,2,3,1]!");
+            }
             // PHASE 3: Channel shuffle NCHW → NHWC
             let batch = input.shape[0] as u32;
             let channels = input.shape[1] as u32;
@@ -1505,6 +1512,13 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let total_elements = batch * channels * height * width;
             let cube_count_x = total_elements.div_ceil(cube_dim.x);
             let cube_count = CubeCount::Static(cube_count_x, 1, 1);
+
+            if std::env::var("CUBECL_DEBUG").is_ok() {
+                eprintln!("[DEBUG] Launching channel_shuffle_nchw_to_nhwc:");
+                eprintln!("[DEBUG]   Shape: [{}, {}, {}, {}]", batch, channels, height, width);
+                eprintln!("[DEBUG]   Total elements: {}", total_elements);
+                eprintln!("[DEBUG]   Cube count: {}", cube_count_x);
+            }
 
             let input_arg = unsafe {
                 TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)

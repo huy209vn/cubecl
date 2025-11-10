@@ -4,6 +4,7 @@ pub mod elementwise;
 pub mod panel;
 pub mod pivot;
 pub mod reduce_ops;
+pub mod syrk;
 
 pub use elementwise::*;
 pub use reduce_ops::*;

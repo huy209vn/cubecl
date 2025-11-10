@@ -729,72 +729,29 @@ where
 
     // SYRK: C := alpha * A * A^T + beta * C
     //
-    // Strategy: Use GEMM with A and A^T
-    // But GEMM computes: D = alpha * A * B + beta * C
-    // We need: C = alpha * A * A^T + beta * C
+    // OPTIMIZATION: Use specialized fused SYRK kernel
+    // - Computes only lower triangle (exploit symmetry)
+    // - Fuses GEMM and update into single kernel
+    // - Avoids temporary MxM allocation
     //
-    // So: D = A, and we need to transpose A for the second operand
+    // Expected speedup: 1.5-2× over GEMM + element-wise approach
     //
-    // Problem: cubecl-matmul doesn't support beta scaling on input C
-    // We need to:
-    // 1. If beta != 1.0: scale C first: C := beta * C
-    // 2. Then: C := alpha * A * A^T + C
-    //
-    // For Phase 1: Only support alpha=-1.0, beta=1.0 (Cholesky case)
-    // TODO Phase 2: Add general alpha/beta support with scaling kernels
+    // Converts alpha/beta from precision EA to EW for kernel
+    let alpha_ew = unsafe { mem::transmute_copy::<P::EA, P::EW>(&alpha) };
+    let beta_ew = unsafe { mem::transmute_copy::<P::EA, P::EW>(&beta) };
 
-    // Create TensorHandles for A (we need A and A^T)
-    let a_handle = TensorHandle::new(a.handle.clone(), a.shape.to_vec(), a.strides.to_vec());
-
-    // For A^T, we swap shape dimensions but keep the handle
-    // A is [m, k], A^T is [k, m]
-    let at_shape = vec![k, m];
-    let at_strides = vec![a.strides[1], a.strides[0]]; // Swap strides for transpose
-    let at_handle = TensorHandle::new(a.handle.clone(), at_shape, at_strides);
-
-    // Output: C is [m, m]
-    // Create output handle for the GEMM result
-    type AccG<MP> = cubecl_matmul::components::AccG<MP>;
-    let temp = TensorHandle::<R, AccG<P::EW>>::empty(client, vec![m, m]);
-
-    // GEMM: temp = alpha * A * A^T
-    // Note: We'll use matmul which doesn't have alpha/beta, so we need to scale afterward
-    let _ = matmul::launch::<R, P::EW>(
-        &MatmulStrategy::Auto,
+    // Launch optimized SYRK kernel
+    crate::kernels::syrk::launch_syrk_fused::<P::EW, R>(
         client,
-        MatmulInputHandle::Normal(a_handle),
-        MatmulInputHandle::Normal(at_handle),
-        temp.clone(),
+        a.handle.clone(),
+        a.shape,
+        a.strides,
+        c.handle.clone(),
+        c.shape,
+        c.strides,
+        alpha_ew,
+        beta_ew,
     );
-
-    // Now we have: temp = A * A^T
-    // We need: C := alpha * temp + beta * C
-    // Since beta = 1.0, this is: C := alpha * temp + C
-    //
-    // For Cholesky: alpha = -1.0, so we want: C := C - temp
-    // This matches fused_scale_sub with scale=1.0: C := 1.0*C - temp
-    //
-    // Phase 1 Note: Caller must pass alpha=-1.0, beta=1.0 (Cholesky case)
-    // We don't validate at runtime to avoid Float comparison issues
-    //
-    // C := C - temp (using fused_scale_sub with scale=1.0)
-    let total_elements = m * m;
-    let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
-    let cube_dim = CubeDim::new(256, 1, 1);
-
-    let one = P::EA::from_int(1);
-    let one_ew = unsafe { mem::transmute_copy::<P::EA, P::EW>(&one) };
-
-    unsafe {
-        fused_scale_sub_kernel::launch::<P::EW, R>(
-            client,
-            cube_count,
-            cube_dim,
-            c.as_tensor_arg(1),
-            temp.as_ref().as_tensor_arg(1),
-            ScalarArg::new(one_ew),
-        );
-    }
 
     Ok(())
 }

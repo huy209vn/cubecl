@@ -805,14 +805,19 @@ fn tiled_permute_kernel_4d<F: Float>(
 /// NO shared memory, NO sync barriers - just register-to-register exchanges!
 ///
 /// Strategy:
-/// - Each plane (warp) handles one 32×32 block
-/// - Threads exchange values using plane_shuffle
-/// - For matrices ≤32: single pass
-/// - 10-50× faster than tiled approaches for small matrices!
+/// - Each plane (warp) handles one small matrix (up to 32×32 = 1024 elements)
+/// - All threads read their input values first
+/// - Then use plane_shuffle to exchange values
+/// - Finally write to transposed output positions
+///
+/// Algorithm:
+/// - Thread T writes to OUTPUT position T
+/// - Calculate what INPUT position that corresponds to
+/// - Use plane_shuffle to read from the thread that has that input value
 ///
 /// Requirements:
 /// - Matrix dimensions must be ≤ 32
-/// - Works best when rows × cols ≤ PLANE_DIM (typically 32)
+/// - Total elements ≤ 1024 (one warp)
 #[cube(launch_unchecked)]
 fn plane_shuffle_transpose_small<F: Float>(
     input: &Tensor<Line<F>>,
@@ -820,38 +825,33 @@ fn plane_shuffle_transpose_small<F: Float>(
     rows: u32,
     cols: u32,
 ) {
-    // Each plane (warp) handles the entire small matrix
     let thread_id = UNIT_POS_PLANE; // Lane ID within the warp
     let total_elements = rows * cols;
 
-    // For a 32×32 or smaller matrix, we can handle it in one plane
     if thread_id < total_elements {
-        // Decompose thread_id into (row, col) for the INPUT matrix
+        // Step 1: Each thread reads its own INPUT value
+        // Thread T reads from linear position T in row-major order
         let in_row = thread_id / cols;
         let in_col = thread_id % cols;
-
-        // Load from input
         let in_offset = in_row * input.stride(0) + in_col * input.stride(1);
-        let value = input[in_offset];
+        let my_value = input[in_offset];
 
-        // Compute transposed position: (in_row, in_col) → (in_col, in_row)
-        let out_row = in_col;
-        let out_col = in_row;
+        // Step 2: Calculate which INPUT value this thread needs for its OUTPUT position
+        // Thread T writes to OUTPUT position T
+        // In the transposed matrix (cols × rows), position T corresponds to:
+        let out_row = thread_id / rows;  // Note: dividing by rows (transposed dimensions!)
+        let out_col = thread_id % rows;
 
-        // Convert back to linear index in OUTPUT layout
-        let out_thread_id = out_row * rows + out_col;
+        // That output position came from input position (out_col, out_row) in original matrix
+        // Which thread has that input value? Thread whose ID is: out_col * cols + out_row
+        let src_thread_id = out_col * cols + out_row;
 
-        // Use plane_shuffle to exchange with the thread that should receive this value
-        // Each thread needs to READ from position out_thread_id
-        let transposed_value = plane_shuffle(value, out_thread_id);
+        // Step 3: Use plane_shuffle to read from that thread
+        let transposed_value = plane_shuffle(my_value, src_thread_id);
 
-        // Write to output
-        if thread_id < total_elements {
-            let final_row = thread_id / rows;
-            let final_col = thread_id % rows;
-            let out_offset = final_row * output.stride(0) + final_col * output.stride(1);
-            output[out_offset] = transposed_value;
-        }
+        // Step 4: Write to output at my position
+        let out_offset = out_row * output.stride(0) + out_col * output.stride(1);
+        output[out_offset] = transposed_value;
     }
 }
 

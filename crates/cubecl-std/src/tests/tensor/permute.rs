@@ -276,3 +276,113 @@ pub fn test_permute_4d_complex<R: Runtime, C: Float + CubeElement>(
         }
     }
 }
+
+/// Test channel shuffle: [B, C, H, W] -> [B, H, W, C] with axes [0, 2, 3, 1]
+/// NCHW → NHWC (Phase 3: specialized kernel)
+pub fn test_permute_channel_shuffle<R: Runtime, C: Float + CubeElement>(
+    device: &R::Device,
+    batch: usize,
+    channels: usize,
+    height: usize,
+    width: usize,
+) {
+    let client = R::client(device);
+
+    let numel = batch * channels * height * width;
+    let input_data: Vec<C> = (0..numel).map(|i| C::from(i as f32).unwrap()).collect();
+
+    let handle = client.create(C::as_bytes(&input_data));
+    let input = TensorHandle::<R, C>::new_contiguous(vec![batch, channels, height, width], handle);
+    let output = tensor::permute::launch_alloc(&client, &input, &[0, 2, 3, 1]);
+
+    let actual = client.read_one_tensor(output.handle.clone().copy_descriptor(
+        &output.shape,
+        &output.strides,
+        size_of::<C>(),
+    ));
+    let actual = C::from_bytes(&actual);
+
+    // Verify output shape: [B, H, W, C]
+    assert_eq!(output.shape, vec![batch, height, width, channels]);
+
+    // Verify permutation: out[b,h,w,c] = in[b,c,h,w]
+    for b in 0..batch {
+        for h in 0..height {
+            for w in 0..width {
+                for c in 0..channels {
+                    let out_idx = b * height * width * channels
+                                + h * width * channels
+                                + w * channels
+                                + c;
+
+                    let in_idx = b * channels * height * width
+                               + c * height * width
+                               + h * width
+                               + w;
+
+                    assert_eq!(
+                        actual[out_idx],
+                        C::from(in_idx as f32).unwrap(),
+                        "Mismatch at output[{},{},{},{}]",
+                        b, h, w, c
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Test attention transpose: [B, H, N, D] -> [B, N, H, D] with axes [0, 2, 1, 3]
+/// Multi-head attention pattern (Phase 3: specialized kernel)
+pub fn test_permute_attention_transpose<R: Runtime, C: Float + CubeElement>(
+    device: &R::Device,
+    batch: usize,
+    heads: usize,
+    seq_len: usize,
+    head_dim: usize,
+) {
+    let client = R::client(device);
+
+    let numel = batch * heads * seq_len * head_dim;
+    let input_data: Vec<C> = (0..numel).map(|i| C::from(i as f32).unwrap()).collect();
+
+    let handle = client.create(C::as_bytes(&input_data));
+    let input = TensorHandle::<R, C>::new_contiguous(vec![batch, heads, seq_len, head_dim], handle);
+    let output = tensor::permute::launch_alloc(&client, &input, &[0, 2, 1, 3]);
+
+    let actual = client.read_one_tensor(output.handle.clone().copy_descriptor(
+        &output.shape,
+        &output.strides,
+        size_of::<C>(),
+    ));
+    let actual = C::from_bytes(&actual);
+
+    // Verify output shape: [B, N, H, D]
+    assert_eq!(output.shape, vec![batch, seq_len, heads, head_dim]);
+
+    // Verify permutation: out[b,n,h,d] = in[b,h,n,d]
+    for b in 0..batch {
+        for n in 0..seq_len {
+            for h in 0..heads {
+                for d in 0..head_dim {
+                    let out_idx = b * seq_len * heads * head_dim
+                                + n * heads * head_dim
+                                + h * head_dim
+                                + d;
+
+                    let in_idx = b * heads * seq_len * head_dim
+                               + h * seq_len * head_dim
+                               + n * head_dim
+                               + d;
+
+                    assert_eq!(
+                        actual[out_idx],
+                        C::from(in_idx as f32).unwrap(),
+                        "Mismatch at output[{},{},{},{}]",
+                        b, n, h, d
+                    );
+                }
+            }
+        }
+    }
+}

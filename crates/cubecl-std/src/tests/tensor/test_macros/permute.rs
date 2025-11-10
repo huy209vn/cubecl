@@ -67,6 +67,26 @@ macro_rules! testgen_tensor_permute {
             pub fn test_4d_complex_permutation() {
                 test_permute_4d_complex::<TestRuntime, NumericT>(&Default::default(), 2, 4, 8, 16);
             }
+
+            #[test]
+            pub fn test_channel_shuffle_small() {
+                test_permute_channel_shuffle::<TestRuntime, NumericT>(&Default::default(), 2, 4, 8, 8);
+            }
+
+            #[test]
+            pub fn test_channel_shuffle_medium() {
+                test_permute_channel_shuffle::<TestRuntime, NumericT>(&Default::default(), 4, 16, 32, 32);
+            }
+
+            #[test]
+            pub fn test_attention_transpose_small() {
+                test_permute_attention_transpose::<TestRuntime, NumericT>(&Default::default(), 2, 8, 16, 64);
+            }
+
+            #[test]
+            pub fn test_attention_transpose_medium() {
+                test_permute_attention_transpose::<TestRuntime, NumericT>(&Default::default(), 4, 12, 128, 64);
+            }
     };
     ([$($numeric:ident),*]) => {
         mod permute {

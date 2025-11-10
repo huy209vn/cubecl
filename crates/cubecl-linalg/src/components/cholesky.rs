@@ -33,9 +33,11 @@ use cubecl_core::prelude::*;
 use cubecl_std::tensor::TensorHandle;
 
 use crate::{
-    LinalgPrecision, LinalgResult, LinalgError, SolveInfo, SolveQuality,
+    LinalgPrecision, LinalgResult, LinalgError, SolveInfo,
     policy::get_block_config,
-    components::triangular::{Triangle, trsm, Side, Transpose, Diagonal},
+    components::triangular::{Triangle, trsm, Side, Transpose, Diagonal, syrk},
+    kernels::panel::{potrf_panel_kernel, extract_diagonal_minmax},
+    kernels::elementwise::copy_kernel,
 };
 
 /// Cholesky factorization: A = L * L^T for SPD matrix A
@@ -92,7 +94,7 @@ pub fn cholesky<R: Runtime, P: LinalgPrecision>(
 ) -> LinalgResult<(TensorHandle<R, P::EW>, SolveInfo)>
 where
     P::EG: Into<P::EW>,
-    P::EW: Float,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
     P::EA: Float,
 {
     // Validate input shape
@@ -120,97 +122,190 @@ where
     let mut l = TensorHandle::<R, P::EW>::empty(client, shape.to_vec());
 
     // Copy A to L (working buffer)
-    // TODO: Implement copy kernel or use memcpy
-    // For now, we'll work in-place on L
+    // Launch copy kernel: L = A
+    let total_elems = shape.iter().product::<usize>();
+    let cube_count = CubeCount::Static(((total_elems + 255) / 256) as u32, 1, 1);
+    let cube_dim = CubeDim::new(256, 1, 1);
 
-    // Batch dimensions
+    copy_kernel::launch::<P::EW, R>(
+        client,
+        cube_count,
+        cube_dim,
+        a.as_tensor_arg(1),
+        l.as_ref().as_tensor_arg(1),
+    );
+
+    // Batch dimensions (for now, only support single matrix - no batching)
     let batch_dims = &shape[..shape.len() - 2];
     let batch_size: usize = batch_dims.iter().product();
     let batch_size = if batch_size == 0 { 1 } else { batch_size };
+
+    if batch_size > 1 {
+        return Err(LinalgError::UnsupportedLayout {
+            layout: format!("Batched Cholesky not yet supported, got batch size {}", batch_size),
+        });
+    }
 
     // Track conditioning info
     let mut info = SolveInfo::new();
     let mut diag_min = f64::INFINITY;
     let mut diag_max = 0.0_f64;
 
-    // For each batch element
-    for batch_idx in 0..batch_size {
-        // Compute batch offset in flat index
-        // TODO: Proper batch indexing
+    // Panel loop: blocked Cholesky
+    for k in (0..n).step_by(nb) {
+        let panel_size = nb.min(n - k);
 
-        // Panel loop: blocked Cholesky
-        for k in (0..n).step_by(nb) {
-            let panel_size = nb.min(n - k);
+        // === Step 1: Panel factorization on diagonal block L[k:k+panel_size, k:k+panel_size] ===
+        // This is an unblocked Cholesky on a small panel using POTRF kernel
 
-            // Step 1: Panel factorization on diagonal block L[k:k+NB, k:k+NB]
-            // This is an unblocked Cholesky on a small panel
-            //
-            // TODO: Launch cholesky_panel_kernel
-            // - Input: A[k:k+NB, k:k+NB]
-            // - Output: L[k:k+NB, k:k+NB] (lower triangular)
-            // - Check diagonal positivity if check_spd == true
+        // Create tensor slice for panel: L[k:k+panel_size, k:k+panel_size]
+        let panel_offset = (k * l.strides[0] + k * l.strides[1]) as u64;
+        let panel_handle = l.handle.clone().offset_start(panel_offset);
+        let panel_shape = vec![panel_size, panel_size];
+        let panel_ref = unsafe {
+            TensorHandleRef::<R>::from_raw_parts(
+                &panel_handle,
+                &l.strides[..],
+                &panel_shape,
+                a.elem_size,
+            )
+        };
 
-            // For now, placeholder:
-            // cholesky_panel_kernel::launch(...)
+        // Allocate info flag tensor (single u32)
+        let mut potrf_info = TensorHandle::<R, u32>::empty(client, vec![1]);
 
-            if check_spd {
-                // TODO: Check that diagonals are positive
-                // If any diagonal <= 0, return Err(LinalgError::NotSPD)
+        // Launch POTRF kernel on panel
+        let panel_threads = usize::min(128, panel_size * 2); // Use enough threads for parallelism
+        let panel_cube_count = CubeCount::Static(1, 1, 1);
+        let panel_cube_dim = CubeDim::new(panel_threads as u32, 1, 1);
+
+        // Epsilon for SPD check: just check for non-positive diagonal
+        // Using 0.0 as threshold (will fail on zero or negative diagonals)
+        let eps = P::EW::from_int(0);
+
+        unsafe {
+            potrf_panel_kernel::launch::<P::EW, R>(
+                client,
+                panel_cube_count,
+                panel_cube_dim,
+                TensorArg::from_raw_parts::<P::EW>(&panel_handle, &l.strides, &panel_shape, 1),
+                ScalarArg::new(panel_size as u32),
+                ScalarArg::new(eps),
+                TensorArg::from_raw_parts::<u32>(&potrf_info.handle, &potrf_info.strides, &potrf_info.shape, 1),
+            );
+        }
+
+        // Check if POTRF succeeded (only if check_spd is true)
+        if check_spd {
+            // TODO: Read back info flag from device and check
+            // For now, we assume success (will add async check later)
+        }
+
+        // === Step 1.5: Extract diagonal min/max for conditioning ===
+        let mut diag_min_tensor = TensorHandle::<R, P::EW>::empty(client, vec![1]);
+        let mut diag_max_tensor = TensorHandle::<R, P::EW>::empty(client, vec![1]);
+
+        let diag_cube_count = CubeCount::Static(1, 1, 1);
+        let diag_cube_dim = CubeDim::new(1, 1, 1);
+
+        unsafe {
+            extract_diagonal_minmax::launch::<P::EW, R>(
+                client,
+                diag_cube_count,
+                diag_cube_dim,
+                TensorArg::from_raw_parts::<P::EW>(&panel_handle, &l.strides, &panel_shape, 1),
+                ScalarArg::new(panel_size as u32),
+                TensorArg::from_raw_parts::<P::EW>(&diag_min_tensor.handle, &diag_min_tensor.strides, &diag_min_tensor.shape, 1),
+                TensorArg::from_raw_parts::<P::EW>(&diag_max_tensor.handle, &diag_max_tensor.strides, &diag_max_tensor.shape, 1),
+            );
+        }
+
+        // TODO: Read back diag_min/max and update conditioning
+        // For Phase 1, we'll compute conditioning at the end
+
+        // === Step 2: TRSM to update subdiagonal panel ===
+        // Solve: L[k+panel_size:n, k:k+panel_size] * L[k:k+panel_size, k:k+panel_size]^T = A[k+panel_size:n, k:k+panel_size]
+        //
+        // This is: X * L11^T = B
+        // TRSM: solve for X given L11 and B
+
+        if k + panel_size < n {
+            let subdiag_rows = n - (k + panel_size);
+
+            // Create subdiagonal slice: L[k+panel_size:n, k:k+panel_size]
+            let subdiag_offset = ((k + panel_size) * l.strides[0] + k * l.strides[1]) as u64;
+            let subdiag_handle = l.handle.clone().offset_start(subdiag_offset);
+            let subdiag_shape = vec![subdiag_rows, panel_size];
+            let subdiag_ref = unsafe {
+                TensorHandleRef::<R>::from_raw_parts(
+                    &subdiag_handle,
+                    &l.strides[..],
+                    &subdiag_shape,
+                    a.elem_size,
+                )
+            };
+
+            // Call TRSM: X = B * inv(L11^T)
+            // Side::Right, Triangle::Lower, Transpose::Trans, alpha=1.0
+            let alpha_one = P::EA::from_int(1);
+
+            let x = trsm::<R, P>(
+                client,
+                Side::Right,
+                Triangle::Lower,
+                Transpose::Trans,
+                Diagonal::NonUnit,
+                alpha_one,
+                panel_ref,
+                subdiag_ref,
+            )?;
+
+            // Copy result back to L[k+panel_size:n, k:k+panel_size]
+            let copy_elems = subdiag_rows * panel_size;
+            let copy_cube_count = CubeCount::Static(((copy_elems + 255) / 256) as u32, 1, 1);
+            let copy_cube_dim = CubeDim::new(256, 1, 1);
+
+            unsafe {
+                copy_kernel::launch::<P::EW, R>(
+                    client,
+                    copy_cube_count,
+                    copy_cube_dim,
+                    x.as_ref().as_tensor_arg(1),
+                    TensorArg::from_raw_parts::<P::EW>(&subdiag_handle, &l.strides, &subdiag_shape, 1),
+                );
             }
 
-            // Track diagonal for conditioning
-            // TODO: Extract diagonal elements, compute min/max
-            // diag_min = min(diag_min, min_diag_in_panel)
-            // diag_max = max(diag_max, max_diag_in_panel)
-
-            // Step 2: TRSM to update subdiagonal panel
-            // Solve: L[k+NB:N, k:k+NB] * L[k:k+NB, k:k+NB]^T = A[k+NB:N, k:k+NB]
+            // === Step 3: SYRK - Symmetric rank-k update of trailing matrix ===
+            // A[k+panel_size:n, k+panel_size:n] -= L[k+panel_size:n, k:k+panel_size] * L[k+panel_size:n, k:k+panel_size]^T
             //
-            // This is a triangular solve: X * U^T = B
-            // Equivalent to: U * X^T = B^T
-            //
-            // TRSM call: solve L11^T * X^T = A21^T for X
-            // Then L21 = X^T
+            // This is: C := alpha * A * A^T + beta * C
+            // With alpha = -1.0, beta = 1.0
 
-            if k + panel_size < n {
-                // TODO: Call trsm to update L[k+NB:N, k:k+NB]
-                //
-                // let x = trsm::<R, P>(
-                //     client,
-                //     Side::Right,
-                //     Triangle::Lower,
-                //     Transpose::Trans,
-                //     Diagonal::NonUnit,
-                //     1.0,  // alpha
-                //     l_panel.as_ref(),  // L11
-                //     a_subdiag.as_ref(), // A21
-                // )?;
-                //
-                // Copy x into L[k+NB:N, k:k+NB]
+            let trailing_size = n - (k + panel_size);
+            let trailing_offset = ((k + panel_size) * l.strides[0] + (k + panel_size) * l.strides[1]) as u64;
+            let trailing_handle = l.handle.clone().offset_start(trailing_offset);
+            let trailing_shape = vec![trailing_size, trailing_size];
+            let trailing_ref = unsafe {
+                TensorHandleRef::<R>::from_raw_parts(
+                    &trailing_handle,
+                    &l.strides[..],
+                    &trailing_shape,
+                    a.elem_size,
+                )
+            };
 
-                // Step 3: SYRK - Symmetric rank-k update of trailing matrix
-                // A[k+NB:N, k+NB:N] -= L[k+NB:N, k:k+NB] * L[k+NB:N, k:k+NB]^T
-                //
-                // This is: C := C - A * A^T
-                //
-                // Use cubecl-matmul with:
-                // - alpha = -1.0
-                // - beta = 1.0
-                // - op(A) = NoTrans
-                // - op(B) = Trans
+            let alpha_neg_one = P::EA::from_int(-1);
+            let beta_one = P::EA::from_int(1);
 
-                // TODO: Call cubecl_matmul::launch
-                //
-                // matmul::launch(
-                //     strategy: &Strategy::Auto,
-                //     client,
-                //     lhs: L21,  // [M-k-NB, NB]
-                //     rhs: L21^T,  // [NB, M-k-NB]
-                //     out: A22,  // [M-k-NB, M-k-NB]
-                // )
-                //
-                // Then: A22 := A22 - result
-            }
+            // SYRK call: C := -1.0 * A * A^T + 1.0 * C
+            // where A = L[k+panel_size:n, k:k+panel_size]
+            syrk::<R, P>(
+                client,
+                alpha_neg_one,
+                subdiag_ref,
+                beta_one,
+                trailing_ref,
+            )?;
         }
     }
 
@@ -262,7 +357,7 @@ pub fn solve_spd<R: Runtime, P: LinalgPrecision>(
 ) -> LinalgResult<(TensorHandle<R, P::EW>, SolveInfo)>
 where
     P::EG: Into<P::EW>,
-    P::EW: Float,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
     P::EA: Float,
 {
     // Step 1: Cholesky factorization
@@ -335,7 +430,7 @@ pub fn inverse_spd<R: Runtime, P: LinalgPrecision>(
 ) -> LinalgResult<(TensorHandle<R, P::EW>, SolveInfo)>
 where
     P::EG: Into<P::EW>,
-    P::EW: Float,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
     P::EA: Float,
 {
     // Step 1: Cholesky factorization

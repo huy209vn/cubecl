@@ -23,6 +23,7 @@
 //! - Recursive case: Small solve → GEMM update → Recurse
 //! - Converts 90%+ of work to highly-optimized GEMM operations
 
+use core::mem;
 use cubecl_core as cubecl;
 use cubecl_core::prelude::*;
 use cubecl_std::tensor::TensorHandle;
@@ -432,7 +433,7 @@ where
         // For all current precision types, EA and EW are the same (f32/f32, f64/f64, etc.)
         // Use a transmute-style conversion via bit representation
         // Safety: EA and EW are always the same size and representation for valid precision types
-        let alpha_bits = unsafe { std::mem::transmute_copy::<P::EA, P::EW>(&alpha) };
+        let alpha_bits = unsafe { mem::transmute_copy::<P::EA, P::EW>(&alpha) };
 
         unsafe {
             small_trsm_left_lower_kernel::launch::<P::EW, R>(
@@ -572,7 +573,7 @@ where
     // For all current precision types, EA and EW are the same (f32/f32, f64/f64, etc.)
     // Use a transmute-style conversion via bit representation
     // Safety: EA and EW are always the same size and representation for valid precision types
-    let alpha_bits = unsafe { std::mem::transmute_copy::<P::EA, P::EW>(&alpha) };
+    let alpha_bits = unsafe { mem::transmute_copy::<P::EA, P::EW>(&alpha) };
 
     unsafe {
         fused_scale_sub_kernel::launch::<P::EW, R>(
@@ -782,7 +783,7 @@ where
     let cube_dim = CubeDim::new(256, 1, 1);
 
     let one = P::EA::from_int(1);
-    let one_ew = unsafe { std::mem::transmute_copy::<P::EA, P::EW>(&one) };
+    let one_ew = unsafe { mem::transmute_copy::<P::EA, P::EW>(&one) };
 
     unsafe {
         fused_scale_sub_kernel::launch::<P::EW, R>(

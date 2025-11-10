@@ -97,12 +97,26 @@ static GLOBAL_POLICY: Lazy<RwLock<PrecisionPolicy>> =
 /// set_precision_policy(policy);
 /// ```
 pub fn set_precision_policy(policy: PrecisionPolicy) {
-    *GLOBAL_POLICY.write().unwrap() = policy;
+    #[cfg(feature = "std")]
+    {
+        *GLOBAL_POLICY.write().unwrap() = policy;
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        *GLOBAL_POLICY.write() = policy;
+    }
 }
 
 /// Get the current global precision policy.
 pub fn get_precision_policy() -> PrecisionPolicy {
-    GLOBAL_POLICY.read().unwrap().clone()
+    #[cfg(feature = "std")]
+    {
+        GLOBAL_POLICY.read().unwrap().clone()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        GLOBAL_POLICY.read().clone()
+    }
 }
 
 /// Block size configuration for factorization algorithms.
@@ -189,7 +203,11 @@ pub fn get_block_config<R: Runtime, P: LinalgPrecision>(
 
     // Try to read from cache
     {
+        #[cfg(feature = "std")]
         let cache = TUNING_CACHE.read().unwrap();
+        #[cfg(not(feature = "std"))]
+        let cache = TUNING_CACHE.read();
+
         if let Some(&config) = cache
             .block_configs
             .get(&(device_id.clone(), dtype_name.to_string()))
@@ -209,7 +227,11 @@ pub fn get_block_config<R: Runtime, P: LinalgPrecision>(
 
     // Cache it
     {
+        #[cfg(feature = "std")]
         let mut cache = TUNING_CACHE.write().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut cache = TUNING_CACHE.write();
+
         cache
             .block_configs
             .insert((device_id, dtype_name.to_string()), config);
@@ -243,7 +265,11 @@ pub fn set_block_config<R: Runtime, P: LinalgPrecision>(
     let device_id = format!("{:?}", client.properties());
     let dtype_name = core::any::type_name::<P::EW>();
 
+    #[cfg(feature = "std")]
     let mut cache = TUNING_CACHE.write().unwrap();
+    #[cfg(not(feature = "std"))]
+    let mut cache = TUNING_CACHE.write();
+
     cache
         .block_configs
         .insert((device_id, dtype_name.to_string()), config);
@@ -254,7 +280,11 @@ pub fn set_block_config<R: Runtime, P: LinalgPrecision>(
 /// Useful for testing or when switching between different
 /// hardware configurations.
 pub fn clear_tuning_cache() {
+    #[cfg(feature = "std")]
     let mut cache = TUNING_CACHE.write().unwrap();
+    #[cfg(not(feature = "std"))]
+    let mut cache = TUNING_CACHE.write();
+
     cache.block_configs.clear();
 }
 

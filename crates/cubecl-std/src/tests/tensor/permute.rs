@@ -386,3 +386,44 @@ pub fn test_permute_attention_transpose<R: Runtime, C: Float + CubeElement>(
         }
     }
 }
+
+/// Test plane shuffle transpose for small matrices (Phase 4)
+/// Should use ultra-fast warp shuffle for tiny matrices (≤32×32)
+pub fn test_permute_small_transpose<R: Runtime, C: Float + CubeElement>(
+    device: &R::Device,
+    size: usize,
+) {
+    let client = R::client(device);
+
+    let numel = size * size;
+    let input_data: Vec<C> = (0..numel).map(|i| C::from(i as f32).unwrap()).collect();
+
+    let handle = client.create(C::as_bytes(&input_data));
+    let input = TensorHandle::<R, C>::new_contiguous(vec![size, size], handle);
+    let output = tensor::permute::launch_alloc(&client, &input, &[1, 0]);
+
+    let actual = client.read_one_tensor(output.handle.clone().copy_descriptor(
+        &output.shape,
+        &output.strides,
+        size_of::<C>(),
+    ));
+    let actual = C::from_bytes(&actual);
+
+    // Verify output shape
+    assert_eq!(output.shape, vec![size, size]);
+
+    // Verify transposed data
+    for row in 0..size {
+        for col in 0..size {
+            let out_idx = row * size + col;
+            let in_idx = col * size + row;
+            assert_eq!(
+                actual[out_idx],
+                C::from(in_idx as f32).unwrap(),
+                "Mismatch at output[{}, {}]",
+                row,
+                col
+            );
+        }
+    }
+}

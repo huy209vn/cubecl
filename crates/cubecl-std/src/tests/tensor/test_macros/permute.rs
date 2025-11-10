@@ -87,6 +87,21 @@ macro_rules! testgen_tensor_permute {
             pub fn test_attention_transpose_medium() {
                 test_permute_attention_transpose::<TestRuntime, NumericT>(&Default::default(), 4, 12, 128, 64);
             }
+
+            #[test]
+            pub fn test_small_transpose_8x8() {
+                test_permute_small_transpose::<TestRuntime, NumericT>(&Default::default(), 8);
+            }
+
+            #[test]
+            pub fn test_small_transpose_16x16() {
+                test_permute_small_transpose::<TestRuntime, NumericT>(&Default::default(), 16);
+            }
+
+            #[test]
+            pub fn test_small_transpose_32x32() {
+                test_permute_small_transpose::<TestRuntime, NumericT>(&Default::default(), 32);
+            }
     };
     ([$($numeric:ident),*]) => {
         mod permute {

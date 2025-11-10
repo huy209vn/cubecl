@@ -1002,6 +1002,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "cuda"), ignore = "CPU backend doesn't support matmul shared memory ops")]
     fn test_syrk_basic() {
         // Test SYRK: C := C - A*A^T (Cholesky update pattern)
         //

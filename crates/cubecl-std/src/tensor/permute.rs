@@ -867,10 +867,10 @@ fn plane_shuffle_transpose_small<F: Float>(
 /// This is one of the most common permutations in computer vision.
 ///
 /// Strategy:
-/// - Each thread handles one (b, h, w) position
-/// - Processes all C channels for that position
-/// - Uses register blocking when C is small (≤32)
-/// - Coalesced writes to output
+/// - Each thread handles ONE element at position (b, c, h, w)
+/// - Direct read from NCHW layout: input[b, c, h, w]
+/// - Direct write to NHWC layout: output[b, h, w, c]
+/// - Fully parallelized - NO loops!
 #[cube(launch_unchecked)]
 fn channel_shuffle_nchw_to_nhwc<F: Float>(
     input: &Tensor<Line<F>>,
@@ -881,35 +881,31 @@ fn channel_shuffle_nchw_to_nhwc<F: Float>(
     width: u32,
 ) {
     let idx = ABSOLUTE_POS;
+    let total_elements = batch * channels * height * width;
 
-    // Total spatial positions (B × H × W)
-    let spatial_size = batch * height * width;
-
-    if idx < spatial_size {
-        // Decompose index into (b, h, w)
+    if idx < total_elements {
+        // Decompose linear index into (b, c, h, w) for INPUT layout
+        let chw = channels * height * width;
         let hw = height * width;
-        let b = idx / hw;
+
+        let b = idx / chw;
+        let c = (idx % chw) / hw;
         let h = (idx % hw) / width;
         let w = idx % width;
 
-        // For each channel, read from NCHW layout and write to NHWC layout
-        let mut c = 0u32;
-        while c < channels {
-            // Input: [b, c, h, w] - channels are contiguous for fixed (b,h,w)
-            let in_offset = b * input.stride(0)
-                          + c * input.stride(1)
-                          + h * input.stride(2)
-                          + w * input.stride(3);
+        // Read from input NCHW: [b, c, h, w]
+        let in_offset = b * input.stride(0)
+                      + c * input.stride(1)
+                      + h * input.stride(2)
+                      + w * input.stride(3);
+        let value = input[in_offset];
 
-            // Output: [b, h, w, c] - spatial dims are outer
-            let out_offset = b * output.stride(0)
-                           + h * output.stride(1)
-                           + w * output.stride(2)
-                           + c * output.stride(3);
-
-            output[out_offset] = input[in_offset];
-            c += 1;
-        }
+        // Write to output NHWC: [b, h, w, c]
+        let out_offset = b * output.stride(0)
+                       + h * output.stride(1)
+                       + w * output.stride(2)
+                       + c * output.stride(3);
+        output[out_offset] = value;
     }
 }
 
@@ -1506,8 +1502,8 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let width = input.shape[3] as u32;
 
             let cube_dim = CubeDim::default();
-            let spatial_size = batch * height * width;
-            let cube_count_x = spatial_size.div_ceil(cube_dim.x);
+            let total_elements = batch * channels * height * width;
+            let cube_count_x = total_elements.div_ceil(cube_dim.x);
             let cube_count = CubeCount::Static(cube_count_x, 1, 1);
 
             let input_arg = unsafe {

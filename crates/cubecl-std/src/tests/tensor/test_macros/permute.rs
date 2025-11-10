@@ -62,6 +62,11 @@ macro_rules! testgen_tensor_permute {
             pub fn test_4d_last_two_transpose_medium() {
                 test_permute_4d_last_two_transpose::<TestRuntime, NumericT>(&Default::default(), 4, 8, 32, 64);
             }
+
+            #[test]
+            pub fn test_4d_complex_permutation() {
+                test_permute_4d_complex::<TestRuntime, NumericT>(&Default::default(), 2, 4, 8, 16);
+            }
     };
     ([$($numeric:ident),*]) => {
         mod permute {

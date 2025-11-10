@@ -221,3 +221,58 @@ pub fn test_permute_4d_last_two_transpose<R: Runtime, C: Float + CubeElement>(
         }
     }
 }
+
+/// Test 4D complex permutation: [B, C, H, W] -> [B, W, C, H] with axes [0, 3, 1, 2]
+/// This should use the tiled_permute_kernel_4d (Phase 2 improvement)
+pub fn test_permute_4d_complex<R: Runtime, C: Float + CubeElement>(
+    device: &R::Device,
+    batch: usize,
+    channels: usize,
+    height: usize,
+    width: usize,
+) {
+    let client = R::client(device);
+
+    let numel = batch * channels * height * width;
+    let input_data: Vec<C> = (0..numel).map(|i| C::from(i as f32).unwrap()).collect();
+
+    let handle = client.create(C::as_bytes(&input_data));
+    let input = TensorHandle::<R, C>::new_contiguous(vec![batch, channels, height, width], handle);
+    let output = tensor::permute::launch_alloc(&client, &input, &[0, 3, 1, 2]);
+
+    let actual = client.read_one_tensor(output.handle.clone().copy_descriptor(
+        &output.shape,
+        &output.strides,
+        size_of::<C>(),
+    ));
+    let actual = C::from_bytes(&actual);
+
+    // Verify output shape: [B, W, C, H]
+    assert_eq!(output.shape, vec![batch, width, channels, height]);
+
+    // Verify permutation: out[b,w,c,h] = in[b,c,h,w]
+    for b in 0..batch {
+        for w in 0..width {
+            for c in 0..channels {
+                for h in 0..height {
+                    let out_idx = b * width * channels * height
+                                + w * channels * height
+                                + c * height
+                                + h;
+
+                    let in_idx = b * channels * height * width
+                               + c * height * width
+                               + h * width
+                               + w;
+
+                    assert_eq!(
+                        actual[out_idx],
+                        C::from(in_idx as f32).unwrap(),
+                        "Mismatch at output[{},{},{},{}]",
+                        b, w, c, h
+                    );
+                }
+            }
+        }
+    }
+}

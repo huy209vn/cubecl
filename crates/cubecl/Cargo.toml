@@ -91,4 +91,3 @@ required-features = ["stdlib"]
 [[bench]]
 name = "attention"
 required-features = ["random"]
-

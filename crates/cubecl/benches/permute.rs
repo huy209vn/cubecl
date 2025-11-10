@@ -197,29 +197,29 @@ fn run_benchmark_suite<R: Runtime>(device: R::Device, backend_name: &str) {
     bench_permute::<R, f16>(&device, vec![8, 32, 512, 64], vec![0, 2, 1, 3], "F16");
     println!();
 
-    // PHASE 4: Small matrix plane shuffle (8×8, 16×16, 32×32)
-    println!("Shape: [8, 8] -> [8, 8] (small transpose - plane shuffle)");
+    // PHASE 4: Tiny matrix plane shuffle (≤32 elements = warp size)
+    println!("Shape: [4, 4] -> [4, 4] (tiny transpose - plane shuffle, 16 elem)");
     println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
     println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![8, 8], vec![1, 0], "F32");
+    bench_permute::<R, f32>(&device, vec![4, 4], vec![1, 0], "F32");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![8, 8], vec![1, 0], "F16");
+    bench_permute::<R, f16>(&device, vec![4, 4], vec![1, 0], "F16");
     println!();
 
-    println!("Shape: [16, 16] -> [16, 16] (small transpose - plane shuffle)");
+    println!("Shape: [4, 8] -> [8, 4] (tiny transpose - plane shuffle, 32 elem)");
     println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
     println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![16, 16], vec![1, 0], "F32");
+    bench_permute::<R, f32>(&device, vec![4, 8], vec![1, 0], "F32");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![16, 16], vec![1, 0], "F16");
+    bench_permute::<R, f16>(&device, vec![4, 8], vec![1, 0], "F16");
     println!();
 
-    println!("Shape: [32, 32] -> [32, 32] (small transpose - plane shuffle)");
+    println!("Shape: [8, 4] -> [4, 8] (tiny transpose - plane shuffle, 32 elem)");
     println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
     println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![32, 32], vec![1, 0], "F32");
+    bench_permute::<R, f32>(&device, vec![8, 4], vec![1, 0], "F32");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![32, 32], vec![1, 0], "F16");
+    bench_permute::<R, f16>(&device, vec![8, 4], vec![1, 0], "F16");
     println!();
 }
 

@@ -89,17 +89,26 @@ macro_rules! testgen_tensor_permute {
             }
 
             #[test]
+            pub fn test_tiny_transpose_4x4() {
+                // 16 elements - uses plane shuffle
+                test_permute_small_transpose::<TestRuntime, NumericT>(&Default::default(), 4);
+            }
+
+            #[test]
             pub fn test_small_transpose_8x8() {
+                // 64 elements - falls back to tiled transpose (too big for plane shuffle)
                 test_permute_small_transpose::<TestRuntime, NumericT>(&Default::default(), 8);
             }
 
             #[test]
             pub fn test_small_transpose_16x16() {
+                // 256 elements - uses tiled transpose
                 test_permute_small_transpose::<TestRuntime, NumericT>(&Default::default(), 16);
             }
 
             #[test]
             pub fn test_small_transpose_32x32() {
+                // 1024 elements - uses tiled transpose
                 test_permute_small_transpose::<TestRuntime, NumericT>(&Default::default(), 32);
             }
     };

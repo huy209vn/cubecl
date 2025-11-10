@@ -387,8 +387,9 @@ pub fn test_permute_attention_transpose<R: Runtime, C: Float + CubeElement>(
     }
 }
 
-/// Test plane shuffle transpose for small matrices (Phase 4)
-/// Should use ultra-fast warp shuffle for tiny matrices (≤32×32)
+/// Test plane shuffle transpose for tiny matrices (Phase 4)
+/// Plane shuffle ONLY activates for matrices with ≤32 elements (warp size limit!)
+/// Larger matrices (8×8=64, 16×16=256, etc.) will use tiled transpose instead
 pub fn test_permute_small_transpose<R: Runtime, C: Float + CubeElement>(
     device: &R::Device,
     size: usize,

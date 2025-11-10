@@ -799,16 +799,19 @@ fn tiled_permute_kernel_4d<F: Float>(
 // SECTION II-A — Plane Shuffle Kernels (PHASE 4)
 // ===========================================================
 
-/// **PHASE 4: Plane Shuffle Transpose for Small Matrices**
+/// **PHASE 4: Plane Shuffle Transpose for Tiny Matrices**
 ///
-/// Ultra-fast transpose for small matrices (≤32×32) using warp/subgroup shuffles.
+/// Ultra-fast transpose for TINY matrices (≤32 elements) using warp/subgroup shuffles.
 /// NO shared memory, NO sync barriers - just register-to-register exchanges!
 ///
+/// CRITICAL CONSTRAINT: Warp size is 32, so we can ONLY handle matrices with ≤32 elements!
+/// Examples: 4×4 (16 elem), 4×8 (32 elem), 8×4 (32 elem), 2×16 (32 elem)
+///
 /// Strategy:
-/// - Each plane (warp) handles one small matrix (up to 32×32 = 1024 elements)
-/// - All threads read their input values first
-/// - Then use plane_shuffle to exchange values
-/// - Finally write to transposed output positions
+/// - One plane (warp) handles the entire tiny matrix
+/// - All threads (≤32) read their input values
+/// - Use plane_shuffle to exchange values within the warp
+/// - Write to transposed output positions
 ///
 /// Algorithm:
 /// - Thread T writes to OUTPUT position T
@@ -816,8 +819,7 @@ fn tiled_permute_kernel_4d<F: Float>(
 /// - Use plane_shuffle to read from the thread that has that input value
 ///
 /// Requirements:
-/// - Matrix dimensions must be ≤ 32
-/// - Total elements ≤ 1024 (one warp)
+/// - Total elements ≤ 32 (WARP_SIZE)
 #[cube(launch_unchecked)]
 fn plane_shuffle_transpose_small<F: Float>(
     input: &Tensor<Line<F>>,
@@ -1712,9 +1714,11 @@ fn launch_batch_transpose_kernel_simple<R: Runtime, F: Float>(
     rows: u32,
     cols: u32,
 ) {
-    // PHASE 4: Use plane shuffle for very small matrices (≤32×32 with ≤1024 elements)
+    // PHASE 4: Use plane shuffle for VERY small matrices
+    // CRITICAL: Plane (warp) size is 32 threads, so we can only handle matrices with ≤32 elements!
+    // This is perfect for tiny transposes like 4×4, 8×4, 4×8, etc.
     let total_elements = rows * cols;
-    let use_plane_shuffle = rows <= 32 && cols <= 32 && total_elements <= 1024 && num_batches == 1;
+    let use_plane_shuffle = total_elements <= 32 && num_batches == 1;
 
     if use_plane_shuffle {
         // Ultra-fast plane shuffle path (no shared memory, no sync!)

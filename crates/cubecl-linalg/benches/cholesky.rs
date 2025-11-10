@@ -41,7 +41,7 @@ fn create_spd_matrix(client: &ComputeClient<<BenchRuntime as Runtime>::Server>, 
     }
 
     let handle = client.create(f32::as_bytes(&values));
-    TensorHandle::new(vec![n, n], vec![n, 1], handle)
+    TensorHandle::new(handle, vec![n, 1], vec![n, n])
 }
 
 /// Benchmark Cholesky factorization for a specific matrix size

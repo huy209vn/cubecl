@@ -7,11 +7,16 @@
 //! Panel factorization is inherently sequential (column j depends on 0..j-1).
 //! The key to SOTA performance is:
 //! 1. Use large block sizes (NB=128-256) so panel time is <5% of total
-//! 2. Within panel: parallelize row updates, use shared memory
+//! 2. Within panel: parallelize row updates, use shared memory, use plane reductions
 //! 3. Minimize synchronization points
 //!
 //! This follows MAGMA's design: make the panel fast enough, but focus on
 //! making the trailing matrix update (GEMM/SYRK) as fast as possible.
+//!
+//! ## Optimizations Applied
+//!
+//! - **Plane reductions**: Diagonal computation uses plane_sum() for parallel reduction
+//! - **Diagonal extraction**: Uses plane_min()/plane_max() for parallel min/max finding
 
 use cubecl_core as cubecl;
 use cubecl_core::prelude::*;
@@ -75,15 +80,25 @@ pub fn potrf_panel_kernel<F: Float>(
     for j in 0..nb {
         // === Step 1: Compute diagonal element L[j,j] ===
         // L[j,j] = sqrt(A[j,j] - sum_{k=0}^{j-1} L[j,k]^2)
+        //
+        // OPTIMIZATION: Parallel reduction using plane_sum()
+        // Each thread computes partial sum, then plane_sum() reduces across warp
 
+        // All threads participate in computing the sum
+        let mut sum = F::new(0.0);
+        let mut k = tid;
+        while k < j {
+            let ljk = panel[j * nb + k];
+            sum += ljk * ljk;
+            k += n_threads;
+        }
+
+        // Reduce across plane (warp-level reduction)
+        sum = plane_sum(sum);
+
+        // Thread 0 finalizes the diagonal computation
         if tid == 0 {
-            let mut ajj = panel[j * nb + j];
-
-            // Subtract contributions from previous columns
-            for k in 0..j {
-                let ljk = panel[j * nb + k];
-                ajj -= ljk * ljk;
-            }
+            let ajj = panel[j * nb + j] - sum;
 
             // Check for positive definiteness
             if ajj <= eps {
@@ -147,7 +162,13 @@ pub fn potrf_panel_kernel<F: Float>(
 ///
 /// ## Launch Configuration
 ///
-/// Use single thread or small reduction kernel.
+/// Use multiple threads with plane reductions for parallel min/max finding.
+///
+/// ## Optimization
+///
+/// Uses plane_min() and plane_max() for parallel reductions instead of
+/// single-threaded scan. Expected 10-100× speedup (though overall impact is
+/// negligible since conditioning is computed infrequently).
 #[cube(launch)]
 pub fn extract_diagonal_minmax<F: Float>(
     matrix: &Tensor<F>,
@@ -155,21 +176,32 @@ pub fn extract_diagonal_minmax<F: Float>(
     diag_min: &mut Tensor<F>,
     diag_max: &mut Tensor<F>,
 ) {
-    if ABSOLUTE_POS == 0 {
-        let mut min_val = matrix[0];
-        let mut max_val = matrix[0];
+    let tid = UNIT_POS;
+    let n_threads = CUBE_DIM_X;
 
-        for i in 1..nb {
-            let d = matrix[i * nb + i];
-            if d < min_val {
-                min_val = d;
-            }
-            if d > max_val {
-                max_val = d;
-            }
+    // Each thread processes subset of diagonal elements
+    let mut local_min = F::INFINITY;
+    let mut local_max = F::NEG_INFINITY;
+
+    let mut i = tid;
+    while i < nb {
+        let d = matrix[i * nb + i];
+        if d < local_min {
+            local_min = d;
         }
+        if d > local_max {
+            local_max = d;
+        }
+        i += n_threads;
+    }
 
-        diag_min[0] = min_val;
-        diag_max[0] = max_val;
+    // Reduce across plane (warp-level reductions)
+    local_min = plane_min(local_min);
+    local_max = plane_max(local_max);
+
+    // Thread 0 writes final result
+    if tid == 0 {
+        diag_min[0] = local_min;
+        diag_max[0] = local_max;
     }
 }

@@ -159,13 +159,13 @@ if thread == 0:
 
 ### Pass 1: Low-Hanging Fruit (1-2 hours)
 - [ ] Vectorize copy kernel (float4 loads/stores)
-- [ ] Parallel diagonal extraction
+- [x] **Parallel diagonal extraction** - using plane_min/plane_max
 - [ ] Precompute panel offsets
 - [ ] **Expected gain**: 5-10% overall
 
 ### Pass 2: Panel Kernel Optimization (2-3 hours)
-- [ ] Warp reduction for diagonal
-- [ ] Warp shuffle for dot products
+- [x] **Plane reduction for diagonal** - using plane_sum() for parallel dot product
+- [ ] Plane shuffle for column dot products (in row updates)
 - [ ] Vectorized panel loads
 - [ ] Loop unrolling for first columns
 - [ ] **Expected gain**: 10-15% on panel time
@@ -280,6 +280,53 @@ After optimization:
 
 ---
 
+## Optimization Log
+
+### 2025-11-10 - Initial Plane Reductions ✅
+
+**Completed**:
+- Implemented `plane_sum()` reduction for diagonal computation in POTRF panel kernel
+- Implemented `plane_min()`/`plane_max()` reductions for diagonal extraction
+- Changed from single-threaded to parallel warp-level operations
+
+**Technical Details**:
+```rust
+// BEFORE: Single-threaded diagonal computation
+if tid == 0 {
+    let mut ajj = panel[j * nb + j];
+    for k in 0..j {
+        let ljk = panel[j * nb + k];
+        ajj -= ljk * ljk;  // ← Only thread 0 works, others idle
+    }
+}
+
+// AFTER: Parallel reduction across warp
+let mut sum = F::new(0.0);
+let mut k = tid;
+while k < j {
+    let ljk = panel[j * nb + k];
+    sum += ljk * ljk;  // ← All threads participate
+    k += n_threads;
+}
+sum = plane_sum(sum);  // ← Warp-level reduction
+if tid == 0 {
+    let ajj = panel[j * nb + j] - sum;
+    ...
+}
+```
+
+**Expected Impact**:
+- Panel kernel: 10-20% faster diagonal computation
+- Diagonal extraction: 10-100× faster (negligible overall impact)
+- Overall Cholesky: ~2-5% speedup (panel is ~5% of total time)
+
+**Next Steps**:
+- Vectorize copy kernel (float4)
+- Optimize column dot products (in row updates) with plane operations
+- SYRK fusion (biggest potential win: 30-50%)
+
+---
+
 **Last Updated**: 2025-11-10
-**Status**: Ready for optimization pass
-**Estimated Total Speedup**: 2-3× over baseline (conservative)
+**Status**: Pass 1 & 2 partial optimizations complete - plane reductions implemented
+**Estimated Total Speedup**: 2-3× over baseline (conservative), 4-5× optimistic

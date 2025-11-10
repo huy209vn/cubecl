@@ -164,3 +164,60 @@ pub fn test_permute_single_element<R: Runtime, C: Float + CubeElement>(device: &
 
     assert_eq!(actual[0], C::from(42.0).unwrap());
 }
+
+/// Test 4D last-2-dim transpose: [B, C, H, W] -> [B, C, W, H] with axes [0, 1, 3, 2]
+/// This should now use the optimized tiled transpose path thanks to Phase 1 improvements
+pub fn test_permute_4d_last_two_transpose<R: Runtime, C: Float + CubeElement>(
+    device: &R::Device,
+    batch: usize,
+    channels: usize,
+    height: usize,
+    width: usize,
+) {
+    let client = R::client(device);
+
+    let numel = batch * channels * height * width;
+    let input_data: Vec<C> = (0..numel).map(|i| C::from(i as f32).unwrap()).collect();
+
+    let handle = client.create(C::as_bytes(&input_data));
+    let input = TensorHandle::<R, C>::new_contiguous(vec![batch, channels, height, width], handle);
+    let output = tensor::permute::launch_alloc(&client, &input, &[0, 1, 3, 2]);
+
+    let actual = client.read_one_tensor(output.handle.clone().copy_descriptor(
+        &output.shape,
+        &output.strides,
+        size_of::<C>(),
+    ));
+    let actual = C::from_bytes(&actual);
+
+    // Verify output shape: [B, C, W, H]
+    assert_eq!(output.shape, vec![batch, channels, width, height]);
+
+    // Verify transposed data (last two dims swapped)
+    for b in 0..batch {
+        for c in 0..channels {
+            for h in 0..height {
+                for w in 0..width {
+                    // Output index: [b][c][w][h]
+                    let out_idx = b * channels * width * height
+                                + c * width * height
+                                + w * height
+                                + h;
+
+                    // Input index: [b][c][h][w]
+                    let in_idx = b * channels * height * width
+                               + c * height * width
+                               + h * width
+                               + w;
+
+                    assert_eq!(
+                        actual[out_idx],
+                        C::from(in_idx as f32).unwrap(),
+                        "Mismatch at output[{},{},{},{}]",
+                        b, c, w, h
+                    );
+                }
+            }
+        }
+    }
+}

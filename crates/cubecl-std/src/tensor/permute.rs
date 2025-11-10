@@ -1329,16 +1329,35 @@ fn launch_batch_transpose_kernel<R: Runtime, F: Float>(
 
 /// Decide if we should use tile-based transpose based on axes pattern and size.
 fn should_use_tile_transpose(num_dims: usize, axes: &[usize], rows: u32, cols: u32) -> bool {
-    // Check if axes pattern matches transpose
-    let pattern_match = match num_dims {
-        2 => axes == [1, 0],
-        3 => axes == [0, 2, 1],
-        _ => false,
+    // Check if it's a "last-2-dim transpose" pattern
+    // This catches [1,0], [0,2,1], [0,1,3,2], [0,1,2,4,3], etc.
+    let is_last_two_transpose = if num_dims >= 2 {
+        // Check if last two axes are swapped
+        let last_two_swapped = axes[num_dims - 2] == num_dims - 1
+                            && axes[num_dims - 1] == num_dims - 2;
+
+        if !last_two_swapped {
+            false
+        } else {
+            // Check that all other axes are identity-mapped (in order)
+            let mut all_identity = true;
+            for i in 0..num_dims - 2 {
+                if axes[i] != i {
+                    all_identity = false;
+                    break;
+                }
+            }
+            all_identity
+        }
+    } else {
+        false
     };
 
-    // Only use tiled transpose for large enough matrices
-    // Small matrices don't benefit from shared memory complexity
-    pattern_match && rows >= TILE_SIZE_MOV4 && cols >= TILE_SIZE_MOV4
+    // OLD: threshold was TILE_SIZE_MOV4 (32x32)
+    // NEW: lowered to 16x16 - even small tiles beat naive kernel
+    let min_tile_size = 16;
+
+    is_last_two_transpose && rows >= min_tile_size && cols >= min_tile_size
 }
 
 /// Check if mov2 vectorized path is viable.
@@ -1398,25 +1417,57 @@ pub fn launch_ref<R: Runtime, F: Float>(
     // 3. Apply dimension folding optimization
     let folded = fold_contiguous_dimensions(input.shape, input.strides, axes);
 
-    // Debug logging for dimension folding (enable with CUBECL_DEBUG=1)
-    if std::env::var("CUBECL_DEBUG").is_ok() {
-        eprintln!(
-            "[PERMUTE] shape={:?} strides={:?} axes={:?}",
-            input.shape, input.strides, axes
-        );
-        eprintln!(
-            "[PERMUTE] folded: shape={:?} axes={:?} simplified={}",
-            folded.folded_shape, folded.folded_axes, folded.was_simplified
-        );
-    }
-
     // 4. Dispatch to appropriate kernel using folded dimensions
     let rank = folded.folded_shape.len();
     let dispatch_axes = folded.folded_axes.as_slice();
 
-    // Check if we can use optimized tile transpose (2D or 3D batch transpose)
-    let can_use_tile_transpose =
-        (rank == 2 && dispatch_axes == [1, 0]) || (rank == 3 && dispatch_axes == [0, 2, 1]);
+    // Check if this is a "last-2-dim transpose" pattern
+    // This now catches [1,0], [0,2,1], [0,1,3,2], [0,1,2,4,3], etc.
+    let is_transpose_pattern = if rank >= 2 {
+        // Check if last two axes are swapped
+        let last_two_swapped = dispatch_axes[rank - 2] == rank - 1
+                            && dispatch_axes[rank - 1] == rank - 2;
+
+        if !last_two_swapped {
+            false
+        } else {
+            // Check that all other axes are identity-mapped (in order)
+            let mut all_identity = true;
+            for i in 0..rank - 2 {
+                if dispatch_axes[i] != i {
+                    all_identity = false;
+                    break;
+                }
+            }
+            all_identity
+        }
+    } else {
+        false
+    };
+
+    let can_use_tile_transpose = is_transpose_pattern;
+
+    // === AGGRESSIVE DEBUG LOGGING (enable with CUBECL_DEBUG=1) ===
+    let debug_enabled = std::env::var("CUBECL_DEBUG").is_ok();
+    if debug_enabled {
+        eprintln!("\n╔════════════════════════════════════════════════════════════════");
+        eprintln!("║ PERMUTE DEBUG");
+        eprintln!("╠════════════════════════════════════════════════════════════════");
+        eprintln!("║ INPUT:");
+        eprintln!("║   shape:   {:?}", input.shape);
+        eprintln!("║   strides: {:?}", input.strides);
+        eprintln!("║   axes:    {:?}", axes);
+        eprintln!("║   count:   {} elements", count);
+        eprintln!("║");
+        eprintln!("║ FOLDING:");
+        eprintln!("║   folded_shape: {:?}", folded.folded_shape);
+        eprintln!("║   folded_axes:  {:?}", folded.folded_axes);
+        eprintln!("║   simplified:   {}", folded.was_simplified);
+        eprintln!("║   rank:         {} → {}", input.shape.len(), rank);
+        eprintln!("║");
+        eprintln!("║ DISPATCH:");
+        eprintln!("║   can_use_tile_transpose: {}", can_use_tile_transpose);
+    }
 
     if can_use_tile_transpose {
         let (rows, cols) = if rank == 2 {
@@ -1430,6 +1481,11 @@ pub fn launch_ref<R: Runtime, F: Float>(
         // Threshold based on typical shared memory tile benefits (32x32 tiles)
         let use_tile = should_use_tile_transpose(rank, dispatch_axes, rows as u32, cols as u32);
 
+        if debug_enabled {
+            eprintln!("║   rows × cols: {} × {}", rows, cols);
+            eprintln!("║   use_tile:    {}", use_tile);
+        }
+
         if use_tile {
             // Extract batch count for 3D case
             let num_batches = if rank == 3 {
@@ -1437,6 +1493,14 @@ pub fn launch_ref<R: Runtime, F: Float>(
             } else {
                 1
             };
+
+            if debug_enabled {
+                eprintln!("║   num_batches: {}", num_batches);
+                eprintln!("║");
+                eprintln!("║ KERNEL SELECTED: ✓ TILED TRANSPOSE (FAST PATH)");
+                eprintln!("╚════════════════════════════════════════════════════════════════\n");
+            }
+
             launch_batch_transpose_kernel_simple::<R, F>(
                 client,
                 input,
@@ -1446,10 +1510,25 @@ pub fn launch_ref<R: Runtime, F: Float>(
                 cols as u32,
             );
         } else {
+            if debug_enabled {
+                eprintln!("║");
+                eprintln!("║ KERNEL SELECTED: ✗ NAIVE (matrix too small for tiling)");
+                eprintln!("╚════════════════════════════════════════════════════════════════\n");
+            }
             // Use naive kernel for small matrices
             launch_permute_kernel::<R, F>(client, input, output, axes);
         }
     } else {
+        if debug_enabled {
+            eprintln!("║");
+            eprintln!("║ KERNEL SELECTED: ✗ NAIVE (pattern doesn't match tile transpose)");
+            eprintln!("║   Reason: Not a last-2-dim transpose pattern");
+            eprintln!("║   This includes:");
+            eprintln!("║     - 3D [2,0,1] (complex permutation)");
+            eprintln!("║     - 4D+ complex permutations");
+            eprintln!("║     - Any non-standard axes combinations");
+            eprintln!("╚════════════════════════════════════════════════════════════════\n");
+        }
         // Use naive kernel for all other permutations
         // This includes:
         // - 3D [2,0,1] (complex permutation)

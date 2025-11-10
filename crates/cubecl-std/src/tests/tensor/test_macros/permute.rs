@@ -52,6 +52,16 @@ macro_rules! testgen_tensor_permute {
             pub fn test_single_element() {
                 test_permute_single_element::<TestRuntime, NumericT>(&Default::default());
             }
+
+            #[test]
+            pub fn test_4d_last_two_transpose_small() {
+                test_permute_4d_last_two_transpose::<TestRuntime, NumericT>(&Default::default(), 2, 3, 16, 24);
+            }
+
+            #[test]
+            pub fn test_4d_last_two_transpose_medium() {
+                test_permute_4d_last_two_transpose::<TestRuntime, NumericT>(&Default::default(), 4, 8, 32, 64);
+            }
     };
     ([$($numeric:ident),*]) => {
         mod permute {

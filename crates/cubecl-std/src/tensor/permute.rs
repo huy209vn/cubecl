@@ -1497,14 +1497,19 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
     axes: &[usize],
     vectorization: u8,
 ) -> bool {
-    if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
-        eprintln!("[DEBUG] match_pattern_rank4: axes={:?}", axes);
-    }
+    // Rate-limited debug: only print once per unique (shape, axes)
+    let should_debug = if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
+        let key = (input.shape.to_vec(), axes.to_vec());
+        let mut printed = DEBUG_PRINTED.lock().unwrap();
+        printed.insert(key)
+    } else {
+        false
+    };
 
     match axes {
         [0, 2, 3, 1] => {
-            if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
-                eprintln!("[DEBUG] ✓ MATCHED Channel Shuffle pattern [0,2,3,1]!");
+            if should_debug {
+                eprintln!("\n[PERMUTE DEBUG] ✓ MATCHED Channel Shuffle [0,2,3,1]!");
             }
             // PHASE 3: Channel shuffle NCHW → NHWC
             let batch = input.shape[0] as u32;
@@ -1517,11 +1522,10 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let cube_count_x = total_elements.div_ceil(cube_dim.x);
             let cube_count = CubeCount::Static(cube_count_x, 1, 1);
 
-            if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
-                eprintln!("[DEBUG] Launching channel_shuffle_nchw_to_nhwc:");
-                eprintln!("[DEBUG]   Shape: [{}, {}, {}, {}]", batch, channels, height, width);
-                eprintln!("[DEBUG]   Total elements: {}", total_elements);
-                eprintln!("[DEBUG]   Cube count: {}", cube_count_x);
+            if should_debug {
+                eprintln!("  Shape: [{}, {}, {}, {}] (NCHW)", batch, channels, height, width);
+                eprintln!("  Total elements: {}", total_elements);
+                eprintln!("  Launching channel_shuffle_nchw_to_nhwc kernel");
             }
 
             let input_arg = unsafe {
@@ -1547,8 +1551,8 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             true
         }
         [0, 2, 1, 3] => {
-            if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
-                eprintln!("[DEBUG] ✓ MATCHED Attention Transpose pattern [0,2,1,3]!");
+            if should_debug {
+                eprintln!("\n[PERMUTE DEBUG] ✓ MATCHED Attention Transpose [0,2,1,3]!");
             }
             // PHASE 3: Attention transpose [B, H, N, D] → [B, N, H, D]
             let batch = input.shape[0] as u32;
@@ -1562,6 +1566,12 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let tiles_per_matrix = num_tile_rows * num_tile_cols;
             let num_matrices = batch * head_dim;
             let total_blocks = num_matrices * tiles_per_matrix;
+
+            if should_debug {
+                eprintln!("  Shape: [{}, {}, {}, {}] (B, H, N, D)", batch, heads, seq_len, head_dim);
+                eprintln!("  Transposing H×N: {} × {}", heads, seq_len);
+                eprintln!("  Launching attention_transpose_kernel (tiled)");
+            }
 
             let cube_dim_2d = CubeDim::new(tile_size, BLOCK_ROWS, 1);
             let cube_count_2d = CubeCount::Static(total_blocks, 1, 1);
@@ -2135,36 +2145,8 @@ pub fn launch_ref<R: Runtime, F: Float>(
 
     let can_use_tile_transpose = is_transpose_pattern;
 
-    // === DEBUG LOGGING (enable with CUBECL_DEBUG_PERMUTE=1) ===
-    // Rate-limited: only prints once per unique (shape, axes) combination
-    let debug_enabled = std::env::var("CUBECL_DEBUG_PERMUTE").is_ok();
-    let should_print_debug = if debug_enabled {
-        let key = (input.shape.to_vec(), axes.to_vec());
-        let mut printed = DEBUG_PRINTED.lock().unwrap();
-        printed.insert(key)
-    } else {
-        false
-    };
-
-    if should_print_debug {
-        eprintln!("\n╔════════════════════════════════════════════════════════════════");
-        eprintln!("║ PERMUTE DEBUG");
-        eprintln!("╠════════════════════════════════════════════════════════════════");
-        eprintln!("║ INPUT:");
-        eprintln!("║   shape:   {:?}", input.shape);
-        eprintln!("║   strides: {:?}", input.strides);
-        eprintln!("║   axes:    {:?}", axes);
-        eprintln!("║   count:   {} elements", count);
-        eprintln!("║");
-        eprintln!("║ FOLDING:");
-        eprintln!("║   folded_shape: {:?}", folded.folded_shape);
-        eprintln!("║   folded_axes:  {:?}", folded.folded_axes);
-        eprintln!("║   simplified:   {}", folded.was_simplified);
-        eprintln!("║   rank:         {} → {}", input.shape.len(), rank);
-        eprintln!("║");
-        eprintln!("║ DISPATCH:");
-        eprintln!("║   can_use_tile_transpose: {}", can_use_tile_transpose);
-    }
+    // Verbose debug logging disabled - causes spam due to benchmark warmup iterations
+    // Only specialized pattern matching debug is enabled (see match_pattern_rank4)
 
     if can_use_tile_transpose {
         let (rows, cols) = if rank == 2 {
@@ -2178,11 +2160,6 @@ pub fn launch_ref<R: Runtime, F: Float>(
         // Threshold based on typical shared memory tile benefits (32x32 tiles)
         let use_tile = should_use_tile_transpose(rank, dispatch_axes, rows as u32, cols as u32);
 
-        if should_print_debug {
-            eprintln!("║   rows × cols: {} × {}", rows, cols);
-            eprintln!("║   use_tile:    {}", use_tile);
-        }
-
         if use_tile {
             // Extract batch count for 3D case
             let num_batches = if rank == 3 {
@@ -2190,13 +2167,6 @@ pub fn launch_ref<R: Runtime, F: Float>(
             } else {
                 1
             };
-
-            if should_print_debug {
-                eprintln!("║   num_batches: {}", num_batches);
-                eprintln!("║");
-                eprintln!("║ KERNEL SELECTED: ✓ TILED TRANSPOSE (FAST PATH)");
-                eprintln!("╚════════════════════════════════════════════════════════════════\n");
-            }
 
             launch_batch_transpose_kernel_simple::<R, F>(
                 client,
@@ -2207,25 +2177,10 @@ pub fn launch_ref<R: Runtime, F: Float>(
                 cols as u32,
             );
         } else {
-            if should_print_debug {
-                eprintln!("║");
-                eprintln!("║ KERNEL SELECTED: ✗ NAIVE (matrix too small for tiling)");
-                eprintln!("╚════════════════════════════════════════════════════════════════\n");
-            }
             // Use naive kernel for small matrices
             launch_permute_kernel::<R, F>(client, input, output, axes);
         }
     } else {
-        if should_print_debug {
-            eprintln!("║");
-            eprintln!("║ KERNEL SELECTED: ✗ NAIVE (pattern doesn't match tile transpose)");
-            eprintln!("║   Reason: Not a last-2-dim transpose pattern");
-            eprintln!("║   This includes:");
-            eprintln!("║     - 3D [2,0,1] (complex permutation)");
-            eprintln!("║     - 4D+ complex permutations");
-            eprintln!("║     - Any non-standard axes combinations");
-            eprintln!("╚════════════════════════════════════════════════════════════════\n");
-        }
         // Use naive kernel for all other permutations
         // This includes:
         // - 3D [2,0,1] (complex permutation)

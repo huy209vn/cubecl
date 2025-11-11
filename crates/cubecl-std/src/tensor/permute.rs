@@ -46,6 +46,10 @@ const TILE_SIZE_MOV2: u32 = 64;
 /// Number of threads per tile column for cooperative loading
 const BLOCK_ROWS: u32 = 8;
 
+// Debug rate limiter: only print debug info once per unique test case
+static DEBUG_PRINTED: LazyLock<Mutex<HashSet<(Vec<usize>, Vec<usize>)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
 // ===========================================================
 // SECTION I — Utility / shape & stride helpers (host-side)
 // ===========================================================
@@ -2131,9 +2135,18 @@ pub fn launch_ref<R: Runtime, F: Float>(
 
     let can_use_tile_transpose = is_transpose_pattern;
 
-    // === AGGRESSIVE DEBUG LOGGING (enable with CUBECL_DEBUG=1) ===
-    let debug_enabled = std::env::var("CUBECL_DEBUG").is_ok();
-    if debug_enabled {
+    // === DEBUG LOGGING (enable with CUBECL_DEBUG_PERMUTE=1) ===
+    // Rate-limited: only prints once per unique (shape, axes) combination
+    let debug_enabled = std::env::var("CUBECL_DEBUG_PERMUTE").is_ok();
+    let should_print_debug = if debug_enabled {
+        let key = (input.shape.to_vec(), axes.to_vec());
+        let mut printed = DEBUG_PRINTED.lock().unwrap();
+        printed.insert(key)
+    } else {
+        false
+    };
+
+    if should_print_debug {
         eprintln!("\n╔════════════════════════════════════════════════════════════════");
         eprintln!("║ PERMUTE DEBUG");
         eprintln!("╠════════════════════════════════════════════════════════════════");
@@ -2165,7 +2178,7 @@ pub fn launch_ref<R: Runtime, F: Float>(
         // Threshold based on typical shared memory tile benefits (32x32 tiles)
         let use_tile = should_use_tile_transpose(rank, dispatch_axes, rows as u32, cols as u32);
 
-        if debug_enabled {
+        if should_print_debug {
             eprintln!("║   rows × cols: {} × {}", rows, cols);
             eprintln!("║   use_tile:    {}", use_tile);
         }
@@ -2178,7 +2191,7 @@ pub fn launch_ref<R: Runtime, F: Float>(
                 1
             };
 
-            if debug_enabled {
+            if should_print_debug {
                 eprintln!("║   num_batches: {}", num_batches);
                 eprintln!("║");
                 eprintln!("║ KERNEL SELECTED: ✓ TILED TRANSPOSE (FAST PATH)");
@@ -2194,7 +2207,7 @@ pub fn launch_ref<R: Runtime, F: Float>(
                 cols as u32,
             );
         } else {
-            if debug_enabled {
+            if should_print_debug {
                 eprintln!("║");
                 eprintln!("║ KERNEL SELECTED: ✗ NAIVE (matrix too small for tiling)");
                 eprintln!("╚════════════════════════════════════════════════════════════════\n");
@@ -2203,7 +2216,7 @@ pub fn launch_ref<R: Runtime, F: Float>(
             launch_permute_kernel::<R, F>(client, input, output, axes);
         }
     } else {
-        if debug_enabled {
+        if should_print_debug {
             eprintln!("║");
             eprintln!("║ KERNEL SELECTED: ✗ NAIVE (pattern doesn't match tile transpose)");
             eprintln!("║   Reason: Not a last-2-dim transpose pattern");

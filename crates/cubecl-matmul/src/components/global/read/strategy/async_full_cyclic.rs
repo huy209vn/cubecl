@@ -7,8 +7,7 @@ use crate::components::{
         memory::{GlobalIterator, load_window_in_tile},
         multi_stage::LoadMaxRoundPlaneCount,
         read::{
-            FullLoadingStrategy, LoadingJob,
-            async_barrier::{AsyncBarrier, CubeManual},
+            FullLoadingStrategy, LoadingJob, async_barrier::AsyncBarrier, validate_async_barrier,
         },
     },
     stage::{ContiguousTilingLayout, StridedStage, TilingOrder, TilingValidation},
@@ -27,7 +26,11 @@ pub struct AsyncFullCyclicLoading<T: TilingOrder> {
 }
 
 impl<T: TilingOrder> LoadingValidation for AsyncFullCyclicLoading<T> {
-    fn check<C: GlobalConfig>(config: &C, ident: MatmulIdent) -> Result<(), InvalidConfigError> {
+    fn check<C: GlobalConfig, R: Runtime>(
+        client: &ComputeClient<R::Server>,
+        config: &C,
+        ident: MatmulIdent,
+    ) -> Result<(), InvalidConfigError> {
         let total_units = config.num_loading_planes(ident) * config.plane_dim();
         let num_slices = config.tiling_scheme().elements_in_tile_row(ident)
             * config.tiling_scheme().tiles_in_stage(ident);
@@ -39,6 +42,7 @@ impl<T: TilingOrder> LoadingValidation for AsyncFullCyclicLoading<T> {
         }
 
         ContiguousTilingLayout::<T>::check(config.global_memory_config(ident))?;
+        validate_async_barrier::<R>(client)?;
 
         Ok(())
     }
@@ -60,7 +64,7 @@ impl<TO: TilingOrder> LoadMaxRoundPlaneCount for AsyncFullCyclicLoading<TO> {
 #[cube]
 impl<TO: TilingOrder> FullLoadingStrategy for AsyncFullCyclicLoading<TO> {
     type TilingLayout = ContiguousTilingLayout<TO>;
-    type SyncStrategy = AsyncBarrier<CubeManual>;
+    type SyncStrategy = AsyncBarrier;
     type Job<IP: MatrixPrecision> = AsyncFullCyclicJob;
 
     const SHOULD_CLEAR: bool = true;
@@ -126,8 +130,8 @@ pub struct AsyncFullCyclicJob {
 }
 
 #[cube]
-impl<IP: MatrixPrecision, TO: TilingOrder>
-    LoadingJob<IP, ContiguousTilingLayout<TO>, AsyncBarrier<CubeManual>> for AsyncFullCyclicJob
+impl<IP: MatrixPrecision, TO: TilingOrder> LoadingJob<IP, ContiguousTilingLayout<TO>, AsyncBarrier>
+    for AsyncFullCyclicJob
 {
     fn execute_task<G: GlobalConfig>(
         this: &mut Self,

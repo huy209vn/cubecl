@@ -1,3 +1,4 @@
+use crate::components::global::read::{validate_async_barrier, validate_tma};
 use crate::components::global::{GlobalConfig, RoleRule, read::async_tma::AsyncTma};
 use crate::components::stage::StridedStage;
 use crate::components::{InvalidConfigError, MatmulIdent};
@@ -17,8 +18,14 @@ use super::{LoadingJob, LoadingValidation};
 pub struct AsyncFullTmaLoading {}
 
 impl LoadingValidation for AsyncFullTmaLoading {
-    fn check<C: GlobalConfig>(config: &C, ident: MatmulIdent) -> Result<(), InvalidConfigError> {
+    fn check<C: GlobalConfig, R: Runtime>(
+        client: &ComputeClient<R::Server>,
+        config: &C,
+        ident: MatmulIdent,
+    ) -> Result<(), InvalidConfigError> {
         TmaTilingLayout::check(config.global_memory_config(ident))?;
+        validate_tma::<R>(client)?;
+        validate_async_barrier::<R>(client)?;
 
         Ok(())
     }
@@ -49,14 +56,13 @@ impl FullLoadingStrategy for AsyncFullTmaLoading {
         #[comptime] config: G,
     ) -> Self::Job<IP> {
         let role_rule_config = config.role_rule_config();
-        let loading_sides = config.specialized_loading_sides();
         let config = config.stage_memory_config(ident);
         let tile_count_col = match config.matrix_layout {
             MatrixLayout::RowMajor => config.tiles_in_stage_col,
             MatrixLayout::ColMajor => config.tiles_in_stage_row,
         };
 
-        let is_elected = RoleRule::new(role_rule_config).is_tma_load_unit(ident, loading_sides);
+        let is_elected = RoleRule::new(role_rule_config).elect_load_leader();
 
         AsyncFullTmaJob {
             is_elected,

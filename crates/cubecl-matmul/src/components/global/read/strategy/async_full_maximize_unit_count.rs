@@ -5,8 +5,7 @@ use crate::components::{
         memory::{GlobalIterator, load_window_in_stage},
         multi_stage::LoadMaxRoundPlaneCount,
         read::{
-            FullLoadingStrategy, LoadingJob,
-            async_barrier::{AsyncBarrier, CubeManual},
+            FullLoadingStrategy, LoadingJob, async_barrier::AsyncBarrier, validate_async_barrier,
         },
     },
     stage::{StridedStage, StridedTilingLayout, TilingValidation},
@@ -22,7 +21,11 @@ use super::LoadingValidation;
 pub struct AsyncFullMaximizeUnitCountLoading {}
 
 impl LoadingValidation for AsyncFullMaximizeUnitCountLoading {
-    fn check<C: GlobalConfig>(config: &C, ident: MatmulIdent) -> Result<(), InvalidConfigError> {
+    fn check<C: GlobalConfig, R: Runtime>(
+        client: &ComputeClient<R::Server>,
+        config: &C,
+        ident: MatmulIdent,
+    ) -> Result<(), InvalidConfigError> {
         let matrix_layout = config.matrix_layout(ident);
         let line_size = config.global_line_size(ident);
 
@@ -50,6 +53,7 @@ impl LoadingValidation for AsyncFullMaximizeUnitCountLoading {
         }
 
         StridedTilingLayout::check(config.global_memory_config(ident))?;
+        validate_async_barrier::<R>(client)?;
 
         Ok(())
     }
@@ -71,7 +75,7 @@ impl LoadMaxRoundPlaneCount for AsyncFullMaximizeUnitCountLoading {
 #[cube]
 impl FullLoadingStrategy for AsyncFullMaximizeUnitCountLoading {
     type TilingLayout = StridedTilingLayout;
-    type SyncStrategy = AsyncBarrier<CubeManual>;
+    type SyncStrategy = AsyncBarrier;
     type Job<IP: MatrixPrecision> = AsyncFullMaximizeUnitCountJob;
 
     const SHOULD_CLEAR: bool = true;
@@ -122,7 +126,7 @@ pub struct AsyncFullMaximizeUnitCountJob {
 }
 
 #[cube]
-impl<IP: MatrixPrecision> LoadingJob<IP, StridedTilingLayout, AsyncBarrier<CubeManual>>
+impl<IP: MatrixPrecision> LoadingJob<IP, StridedTilingLayout, AsyncBarrier>
     for AsyncFullMaximizeUnitCountJob
 {
     fn execute_task<G: GlobalConfig>(

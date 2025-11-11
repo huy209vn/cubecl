@@ -1493,13 +1493,13 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
     axes: &[usize],
     vectorization: u8,
 ) -> bool {
-    if std::env::var("CUBECL_DEBUG").is_ok() {
+    if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
         eprintln!("[DEBUG] match_pattern_rank4: axes={:?}", axes);
     }
 
     match axes {
         [0, 2, 3, 1] => {
-            if std::env::var("CUBECL_DEBUG").is_ok() {
+            if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
                 eprintln!("[DEBUG] ✓ MATCHED Channel Shuffle pattern [0,2,3,1]!");
             }
             // PHASE 3: Channel shuffle NCHW → NHWC
@@ -1513,7 +1513,7 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let cube_count_x = total_elements.div_ceil(cube_dim.x);
             let cube_count = CubeCount::Static(cube_count_x, 1, 1);
 
-            if std::env::var("CUBECL_DEBUG").is_ok() {
+            if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
                 eprintln!("[DEBUG] Launching channel_shuffle_nchw_to_nhwc:");
                 eprintln!("[DEBUG]   Shape: [{}, {}, {}, {}]", batch, channels, height, width);
                 eprintln!("[DEBUG]   Total elements: {}", total_elements);
@@ -1543,6 +1543,9 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             true
         }
         [0, 2, 1, 3] => {
+            if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
+                eprintln!("[DEBUG] ✓ MATCHED Attention Transpose pattern [0,2,1,3]!");
+            }
             // PHASE 3: Attention transpose [B, H, N, D] → [B, N, H, D]
             let batch = input.shape[0] as u32;
             let heads = input.shape[1] as u32;

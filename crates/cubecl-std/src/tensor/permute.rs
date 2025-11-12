@@ -31,9 +31,6 @@ use super::TensorHandle;
 use cubecl::frontend::TensorHandleRef;
 use cubecl::prelude::*;
 use cubecl_core as cubecl;
-use std::collections::HashSet;
-use std::env;
-use std::sync::{LazyLock, Mutex};
 
 // ================================
 // Constants & tuning parameters
@@ -45,10 +42,6 @@ const TILE_SIZE_MOV4: u32 = 32;
 const TILE_SIZE_MOV2: u32 = 64;
 /// Number of threads per tile column for cooperative loading
 const BLOCK_ROWS: u32 = 8;
-
-// Debug rate limiter: only print debug info once per unique test case
-static DEBUG_PRINTED: LazyLock<Mutex<HashSet<(Vec<usize>, Vec<usize>)>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 // ===========================================================
 // SECTION I — Utility / shape & stride helpers (host-side)
@@ -1497,20 +1490,8 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
     axes: &[usize],
     vectorization: u8,
 ) -> bool {
-    // Rate-limited debug: only print once per unique (shape, axes)
-    let should_debug = if std::env::var("CUBECL_DEBUG_PERMUTE").is_ok() {
-        let key = (input.shape.to_vec(), axes.to_vec());
-        let mut printed = DEBUG_PRINTED.lock().unwrap();
-        printed.insert(key)
-    } else {
-        false
-    };
-
     match axes {
         [0, 2, 3, 1] => {
-            if should_debug {
-                eprintln!("\n[PERMUTE DEBUG] ✓ MATCHED Channel Shuffle [0,2,3,1]!");
-            }
             // PHASE 3: Channel shuffle NCHW → NHWC
             let batch = input.shape[0] as u32;
             let channels = input.shape[1] as u32;
@@ -1521,12 +1502,6 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let total_elements = batch * channels * height * width;
             let cube_count_x = total_elements.div_ceil(cube_dim.x);
             let cube_count = CubeCount::Static(cube_count_x, 1, 1);
-
-            if should_debug {
-                eprintln!("  Shape: [{}, {}, {}, {}] (NCHW)", batch, channels, height, width);
-                eprintln!("  Total elements: {}", total_elements);
-                eprintln!("  Launching channel_shuffle_nchw_to_nhwc kernel");
-            }
 
             let input_arg = unsafe {
                 TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
@@ -1551,9 +1526,6 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             true
         }
         [0, 2, 1, 3] => {
-            if should_debug {
-                eprintln!("\n[PERMUTE DEBUG] ✓ MATCHED Attention Transpose [0,2,1,3]!");
-            }
             // PHASE 3: Attention transpose [B, H, N, D] → [B, N, H, D]
             let batch = input.shape[0] as u32;
             let heads = input.shape[1] as u32;
@@ -1566,12 +1538,6 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let tiles_per_matrix = num_tile_rows * num_tile_cols;
             let num_matrices = batch * head_dim;
             let total_blocks = num_matrices * tiles_per_matrix;
-
-            if should_debug {
-                eprintln!("  Shape: [{}, {}, {}, {}] (B, H, N, D)", batch, heads, seq_len, head_dim);
-                eprintln!("  Transposing H×N: {} × {}", heads, seq_len);
-                eprintln!("  Launching attention_transpose_kernel (tiled)");
-            }
 
             let cube_dim_2d = CubeDim::new(tile_size, BLOCK_ROWS, 1);
             let cube_count_2d = CubeCount::Static(total_blocks, 1, 1);

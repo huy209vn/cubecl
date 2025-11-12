@@ -10,6 +10,7 @@ fn bench_permute<R: Runtime, E: frontend::Float + CubeElement>(
     input_shape: Vec<usize>,
     axes: Vec<usize>,
     dtype_name: &str,
+    test_description: &str,
 ) {
     let client = R::client(device);
 
@@ -95,8 +96,8 @@ fn bench_permute<R: Runtime, E: frontend::Float + CubeElement>(
     let bandwidth_gbs = (total_bytes as f64 / 1e9) / (avg_ms / 1000.0);
 
     println!(
-        "{:4} | {:10.3} | {:15.2} | {:6}",
-        dtype_name, avg_ms, bandwidth_gbs, iterations
+        "{:4} | {:10.3} | {:15.2} | {:6} | {}",
+        dtype_name, avg_ms, bandwidth_gbs, iterations, test_description
     );
 }
 
@@ -104,122 +105,121 @@ fn run_benchmark_suite<R: Runtime>(device: R::Device, backend_name: &str) {
     println!("\n=== {} PERMUTE/TRANSPOSE BENCHMARK ===\n", backend_name);
 
     // 2D transpose benchmarks
-    println!("Shape: [1024, 1024] -> [1024, 1024] (transpose)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![1024, 1024], vec![1, 0], "F32");
+    println!("TEST: 2D Transpose [1024, 1024] axes=[1,0]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![1024, 1024], vec![1, 0], "F32", "tiled_transpose (Phase 2)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![1024, 1024], vec![1, 0], "F16");
+    bench_permute::<R, f16>(&device, vec![1024, 1024], vec![1, 0], "F16", "tiled_transpose (Phase 2)");
     println!();
 
-    println!("Shape: [4096, 4096] -> [4096, 4096] (transpose)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![4096, 4096], vec![1, 0], "F32");
+    println!("TEST: 2D Transpose [4096, 4096] axes=[1,0]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![4096, 4096], vec![1, 0], "F32", "tiled_transpose (Phase 2)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![4096, 4096], vec![1, 0], "F16");
+    bench_permute::<R, f16>(&device, vec![4096, 4096], vec![1, 0], "F16", "tiled_transpose (Phase 2)");
     println!();
 
     // 3D batch transpose: various batch sizes with 1024x1024 matrices
-    println!("Shape: [32, 1024, 1024] -> [32, 1024, 1024] (batch transpose)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![32, 1024, 1024], vec![0, 2, 1], "F32");
+    println!("TEST: Batch Transpose [32, 1024, 1024] axes=[0,2,1]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![32, 1024, 1024], vec![0, 2, 1], "F32", "tiled_transpose (Phase 2)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![32, 1024, 1024], vec![0, 2, 1], "F16");
+    bench_permute::<R, f16>(&device, vec![32, 1024, 1024], vec![0, 2, 1], "F16", "tiled_transpose (Phase 2)");
     println!();
 
-    println!("Shape: [16, 1024, 1024] -> [16, 1024, 1024] (batch transpose)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![16, 1024, 1024], vec![0, 2, 1], "F32");
+    println!("TEST: Batch Transpose [16, 1024, 1024] axes=[0,2,1]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![16, 1024, 1024], vec![0, 2, 1], "F32", "tiled_transpose (Phase 2)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![16, 1024, 1024], vec![0, 2, 1], "F16");
+    bench_permute::<R, f16>(&device, vec![16, 1024, 1024], vec![0, 2, 1], "F16", "tiled_transpose (Phase 2)");
     println!();
 
-    println!("Shape: [8, 1024, 1024] -> [8, 1024, 1024] (batch transpose)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![8, 1024, 1024], vec![0, 2, 1], "F32");
+    println!("TEST: Batch Transpose [8, 1024, 1024] axes=[0,2,1]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![8, 1024, 1024], vec![0, 2, 1], "F32", "tiled_transpose (Phase 2)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![8, 1024, 1024], vec![0, 2, 1], "F16");
+    bench_permute::<R, f16>(&device, vec![8, 1024, 1024], vec![0, 2, 1], "F16", "tiled_transpose (Phase 2)");
     println!();
 
-    println!("Shape: [4, 1024, 1024] -> [4, 1024, 1024] (batch transpose)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![4, 1024, 1024], vec![0, 2, 1], "F32");
+    println!("TEST: Batch Transpose [4, 1024, 1024] axes=[0,2,1]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![4, 1024, 1024], vec![0, 2, 1], "F32", "tiled_transpose (Phase 2)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![4, 1024, 1024], vec![0, 2, 1], "F16");
+    bench_permute::<R, f16>(&device, vec![4, 1024, 1024], vec![0, 2, 1], "F16", "tiled_transpose (Phase 2)");
     println!();
 
-    println!("Shape: [1, 1024, 1024] -> [1, 1024, 1024] (batch transpose)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![1, 1024, 1024], vec![0, 2, 1], "F32");
+    println!("TEST: Batch Transpose [1, 1024, 1024] axes=[0,2,1]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![1, 1024, 1024], vec![0, 2, 1], "F32", "tiled_transpose (Phase 2)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![1, 1024, 1024], vec![0, 2, 1], "F16");
+    bench_permute::<R, f16>(&device, vec![1, 1024, 1024], vec![0, 2, 1], "F16", "tiled_transpose (Phase 2)");
     println!();
 
-    // 3D batch transpose: original 512x512 case
-    println!("Shape: [32, 512, 512] -> [32, 512, 512] (batch transpose)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![32, 512, 512], vec![0, 2, 1], "F32");
+    println!("TEST: Batch Transpose [32, 512, 512] axes=[0,2,1]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![32, 512, 512], vec![0, 2, 1], "F32", "tiled_transpose (Phase 2)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![32, 512, 512], vec![0, 2, 1], "F16");
+    bench_permute::<R, f16>(&device, vec![32, 512, 512], vec![0, 2, 1], "F16", "tiled_transpose (Phase 2)");
     println!();
 
     // 3D complex permutation
-    println!("Shape: [128, 64, 64] -> [64, 128, 64] (complex permute)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![128, 64, 64], vec![2, 0, 1], "F32");
+    println!("TEST: Complex Permute [128, 64, 64] axes=[2,0,1]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![128, 64, 64], vec![2, 0, 1], "F32", "naive_permute (fallback)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![128, 64, 64], vec![2, 0, 1], "F16");
+    bench_permute::<R, f16>(&device, vec![128, 64, 64], vec![2, 0, 1], "F16", "naive_permute (fallback)");
     println!();
 
     // PHASE 3: Channel shuffle NCHW → NHWC [0,2,3,1]
-    println!("Shape: [32, 256, 56, 56] -> [32, 56, 56, 256] (channel shuffle NCHW→NHWC)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![32, 256, 56, 56], vec![0, 2, 3, 1], "F32");
+    println!("TEST: ⭐ PHASE 3 - Channel Shuffle [32, 256, 56, 56] axes=[0,2,3,1] NCHW→NHWC");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![32, 256, 56, 56], vec![0, 2, 3, 1], "F32", "channel_shuffle_nchw_to_nhwc (Phase 3)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![32, 256, 56, 56], vec![0, 2, 3, 1], "F16");
+    bench_permute::<R, f16>(&device, vec![32, 256, 56, 56], vec![0, 2, 3, 1], "F16", "channel_shuffle_nchw_to_nhwc (Phase 3)");
     println!();
 
     // PHASE 3: Attention transpose [B, H, N, D] → [B, N, H, D] [0,2,1,3]
-    println!("Shape: [8, 32, 512, 64] -> [8, 512, 32, 64] (attention transpose)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![8, 32, 512, 64], vec![0, 2, 1, 3], "F32");
+    println!("TEST: ⭐ PHASE 3 - Attention Transpose [8, 32, 512, 64] axes=[0,2,1,3]");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![8, 32, 512, 64], vec![0, 2, 1, 3], "F32", "attention_transpose_kernel (Phase 3)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![8, 32, 512, 64], vec![0, 2, 1, 3], "F16");
+    bench_permute::<R, f16>(&device, vec![8, 32, 512, 64], vec![0, 2, 1, 3], "F16", "attention_transpose_kernel (Phase 3)");
     println!();
 
     // PHASE 4: Tiny matrix plane shuffle (≤32 elements = warp size)
-    println!("Shape: [4, 4] -> [4, 4] (tiny transpose - plane shuffle, 16 elem)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![4, 4], vec![1, 0], "F32");
+    println!("TEST: PHASE 4 - Plane Shuffle [4, 4] axes=[1,0] (16 elem)");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![4, 4], vec![1, 0], "F32", "plane_shuffle_transpose (Phase 4)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![4, 4], vec![1, 0], "F16");
+    bench_permute::<R, f16>(&device, vec![4, 4], vec![1, 0], "F16", "plane_shuffle_transpose (Phase 4)");
     println!();
 
-    println!("Shape: [4, 8] -> [8, 4] (tiny transpose - plane shuffle, 32 elem)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![4, 8], vec![1, 0], "F32");
+    println!("TEST: PHASE 4 - Plane Shuffle [4, 8] axes=[1,0] (32 elem)");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![4, 8], vec![1, 0], "F32", "plane_shuffle_transpose (Phase 4)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![4, 8], vec![1, 0], "F16");
+    bench_permute::<R, f16>(&device, vec![4, 8], vec![1, 0], "F16", "plane_shuffle_transpose (Phase 4)");
     println!();
 
-    println!("Shape: [8, 4] -> [4, 8] (tiny transpose - plane shuffle, 32 elem)");
-    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters");
-    println!("-----|-------------|-----------------|-------");
-    bench_permute::<R, f32>(&device, vec![8, 4], vec![1, 0], "F32");
+    println!("TEST: PHASE 4 - Plane Shuffle [8, 4] axes=[1,0] (32 elem)");
+    println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
+    println!("-----|-------------|-----------------|-------|-------");
+    bench_permute::<R, f32>(&device, vec![8, 4], vec![1, 0], "F32", "plane_shuffle_transpose (Phase 4)");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![8, 4], vec![1, 0], "F16");
+    bench_permute::<R, f16>(&device, vec![8, 4], vec![1, 0], "F16", "plane_shuffle_transpose (Phase 4)");
     println!();
 }
 

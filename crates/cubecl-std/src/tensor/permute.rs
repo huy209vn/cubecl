@@ -635,166 +635,6 @@ fn permute_kernel_generic<F: Float>(
     }
 }
 
-/// **PHASE 2: Tiled Generic Permute Kernel**
-///
-/// This kernel improves on the naive generic permute by using shared memory
-/// to cache input data, providing better memory locality for arbitrary permutations.
-///
-/// Strategy:
-/// - Each block handles TILE_SIZE output elements
-/// - Cooperatively load corresponding input elements into shared memory
-/// - Compute permutation from shared memory (better cache locality)
-/// - Write to output (coalesced)
-///
-/// Expected speedup: 2-5× for complex permutations vs naive kernel
-#[cube(launch_unchecked)]
-fn tiled_permute_kernel_3d<F: Float>(
-    input: &Tensor<Line<F>>,
-    output: &mut Tensor<Line<F>>,
-    axes_0: u32,
-    axes_1: u32,
-    axes_2: u32,
-    #[comptime] tile_size: u32,
-) {
-    // Block and thread indices
-    let block_idx = CUBE_POS;
-    let thread_idx = UNIT_POS;
-
-    // Shared memory tile for caching input data
-    let mut tile = SharedMemory::<F>::new_lined(tile_size, 1u32);
-
-    // Compute output element range for this block
-    let block_start = block_idx * tile_size;
-    let out_idx = block_start + thread_idx;
-
-    // Total output elements
-    let count = output.shape(0) * output.shape(1) * output.shape(2);
-
-    // Phase 1: Cooperatively load input data into shared memory
-    // Each thread computes which input element it needs
-    if out_idx < count {
-        let shape_12 = output.shape(1) * output.shape(2);
-        let out_0 = out_idx / shape_12;
-        let out_1 = (out_idx % shape_12) / output.shape(2);
-        let out_2 = out_idx % output.shape(2);
-
-        // Apply permutation to get input coordinates
-        let in_0 = if axes_0 == 0 {
-            out_0
-        } else if axes_0 == 1 {
-            out_1
-        } else {
-            out_2
-        };
-        let in_1 = if axes_1 == 0 {
-            out_0
-        } else if axes_1 == 1 {
-            out_1
-        } else {
-            out_2
-        };
-        let in_2 = if axes_2 == 0 {
-            out_0
-        } else if axes_2 == 1 {
-            out_1
-        } else {
-            out_2
-        };
-
-        // Load from input into shared memory
-        let in_offset = in_0 * input.stride(0) + in_1 * input.stride(1) + in_2 * input.stride(2);
-        tile[thread_idx] = input[in_offset];
-    }
-
-    // Synchronize to ensure all threads have loaded their data
-    sync_cube();
-
-    // Phase 2: Write from shared memory to output (coalesced)
-    if out_idx < count {
-        output[out_idx] = tile[thread_idx];
-    }
-}
-
-/// Tiled permute kernel for rank-4 tensors
-#[cube(launch_unchecked)]
-fn tiled_permute_kernel_4d<F: Float>(
-    input: &Tensor<Line<F>>,
-    output: &mut Tensor<Line<F>>,
-    axes_0: u32,
-    axes_1: u32,
-    axes_2: u32,
-    axes_3: u32,
-    #[comptime] tile_size: u32,
-) {
-    let block_idx = CUBE_POS;
-    let thread_idx = UNIT_POS;
-
-    let mut tile = SharedMemory::<F>::new_lined(tile_size, 1u32);
-
-    let block_start = block_idx * tile_size;
-    let out_idx = block_start + thread_idx;
-
-    let count = output.shape(0) * output.shape(1) * output.shape(2) * output.shape(3);
-
-    if out_idx < count {
-        let shape_123 = output.shape(1) * output.shape(2) * output.shape(3);
-        let shape_23 = output.shape(2) * output.shape(3);
-        let out_0 = out_idx / shape_123;
-        let out_1 = (out_idx % shape_123) / shape_23;
-        let out_2 = (out_idx % shape_23) / output.shape(3);
-        let out_3 = out_idx % output.shape(3);
-
-        let in_0 = if axes_0 == 0 {
-            out_0
-        } else if axes_0 == 1 {
-            out_1
-        } else if axes_0 == 2 {
-            out_2
-        } else {
-            out_3
-        };
-        let in_1 = if axes_1 == 0 {
-            out_0
-        } else if axes_1 == 1 {
-            out_1
-        } else if axes_1 == 2 {
-            out_2
-        } else {
-            out_3
-        };
-        let in_2 = if axes_2 == 0 {
-            out_0
-        } else if axes_2 == 1 {
-            out_1
-        } else if axes_2 == 2 {
-            out_2
-        } else {
-            out_3
-        };
-        let in_3 = if axes_3 == 0 {
-            out_0
-        } else if axes_3 == 1 {
-            out_1
-        } else if axes_3 == 2 {
-            out_2
-        } else {
-            out_3
-        };
-
-        let in_offset = in_0 * input.stride(0)
-            + in_1 * input.stride(1)
-            + in_2 * input.stride(2)
-            + in_3 * input.stride(3);
-        tile[thread_idx] = input[in_offset];
-    }
-
-    sync_cube();
-
-    if out_idx < count {
-        output[out_idx] = tile[thread_idx];
-    }
-}
-
 // ===========================================================
 // SECTION II-A — Plane Shuffle Kernels (PHASE 4)
 // ===========================================================
@@ -866,33 +706,28 @@ fn plane_shuffle_transpose_small<F: Float>(
 /// Optimized kernel for [B, C, H, W] → [B, H, W, C] with axes [0, 2, 3, 1]
 /// This is one of the most common permutations in computer vision.
 ///
+/// **OPTIMIZED:** Uses 4D grid to eliminate ALL division/modulo operations.
+///
 /// Strategy:
+/// - Use 3D grid (batch, channels, height) + thread dimension (width)
+/// - Direct access to coordinates - NO expensive integer division!
 /// - Each thread handles ONE element at position (b, c, h, w)
 /// - Direct read from NCHW layout: input[b, c, h, w]
 /// - Direct write to NHWC layout: output[b, h, w, c]
-/// - Fully parallelized - NO loops!
 #[cube(launch_unchecked)]
 fn channel_shuffle_nchw_to_nhwc<F: Float>(
     input: &Tensor<Line<F>>,
     output: &mut Tensor<Line<F>>,
-    batch: u32,
-    channels: u32,
-    height: u32,
     width: u32,
 ) {
-    let idx = ABSOLUTE_POS;
-    let total_elements = batch * channels * height * width;
+    // Direct 4D coordinates from grid - NO division/modulo!
+    let b = CUBE_POS_X;  // Batch index
+    let c = CUBE_POS_Y;  // Channel index
+    let h = CUBE_POS_Z;  // Height index
+    let w = UNIT_POS;    // Width index (thread within block)
 
-    if idx < total_elements {
-        // Decompose linear index into (b, c, h, w) for INPUT layout
-        let chw = channels * height * width;
-        let hw = height * width;
-
-        let b = idx / chw;
-        let c = (idx % chw) / hw;
-        let h = (idx % hw) / width;
-        let w = idx % width;
-
+    // Bounds check only for width (others guaranteed by grid size)
+    if w < width {
         // Read from input NCHW: [b, c, h, w]
         let in_offset = b * input.stride(0)
                       + c * input.stride(1)
@@ -1479,15 +1314,18 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
     match axes {
         [0, 2, 3, 1] => {
             // PHASE 3: Channel shuffle NCHW → NHWC
+            // OPTIMIZED: Use 4D grid to eliminate ALL division/modulo operations
             let batch = input.shape[0] as u32;
             let channels = input.shape[1] as u32;
             let height = input.shape[2] as u32;
             let width = input.shape[3] as u32;
 
-            let cube_dim = CubeDim::default();
-            let total_elements = batch * channels * height * width;
-            let cube_count_x = total_elements.div_ceil(cube_dim.x);
-            let cube_count = CubeCount::Static(cube_count_x, 1, 1);
+            // Use 3D grid (batch, channels, height) + thread dimension for width
+            // This allows direct access to (b, c, h) from grid, w from thread position
+            // Maximum threads per block is typically 1024, but use 256 for better occupancy
+            let threads_per_block = if width < 256 { width } else { 256 };
+            let cube_dim = CubeDim::new(threads_per_block, 1, 1);
+            let cube_count = CubeCount::Static(batch, channels, height);
 
             let input_arg = unsafe {
                 TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
@@ -1503,9 +1341,6 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
                     cube_dim,
                     input_arg,
                     output_arg,
-                    ScalarArg::new(batch),
-                    ScalarArg::new(channels),
-                    ScalarArg::new(height),
                     ScalarArg::new(width),
                 );
             }
@@ -1632,61 +1467,23 @@ fn launch_permute_kernel<R: Runtime, F: Float>(
                 panic!("Permute only supports ranks 2-6, got rank {}", rank);
             }
 
-            // Use tiled kernels for ranks 3-4 (shared memory optimization)
-            // For ranks 2, 5, 6: fall back to naive kernel
-            if rank == 3 {
-                // Tiled 3D permute kernel
-                let tile_size = cube_dim.x;
-                let num_blocks = num_elements.div_ceil(tile_size);
-                let tiled_cube_count = CubeCount::Static(num_blocks, 1, 1);
-
-                tiled_permute_kernel_3d::launch_unchecked::<F, R>(
-                    client,
-                    tiled_cube_count,
-                    cube_dim,
-                    input_arg,
-                    output_arg,
-                    ScalarArg::new(axes_0),
-                    ScalarArg::new(axes_1),
-                    ScalarArg::new(axes_2),
-                    tile_size,
-                );
-            } else if rank == 4 {
-                // Tiled 4D permute kernel
-                let tile_size = cube_dim.x;
-                let num_blocks = num_elements.div_ceil(tile_size);
-                let tiled_cube_count = CubeCount::Static(num_blocks, 1, 1);
-
-                tiled_permute_kernel_4d::launch_unchecked::<F, R>(
-                    client,
-                    tiled_cube_count,
-                    cube_dim,
-                    input_arg,
-                    output_arg,
-                    ScalarArg::new(axes_0),
-                    ScalarArg::new(axes_1),
-                    ScalarArg::new(axes_2),
-                    ScalarArg::new(axes_3),
-                    tile_size,
-                );
-            } else {
-                // Fall back to naive kernel for ranks 2, 5, 6
-                // TODO: Add tiled kernels for these ranks too
-                permute_kernel_generic::launch_unchecked::<F, R>(
-                    client,
-                    cube_count,
-                    cube_dim,
-                    input_arg,
-                    output_arg,
-                    ScalarArg::new(axes_0),
-                    ScalarArg::new(axes_1),
-                    ScalarArg::new(axes_2),
-                    ScalarArg::new(axes_3),
-                    ScalarArg::new(axes_4),
-                    ScalarArg::new(axes_5),
-                    rank as u32,
-                );
-            }
+            // Use naive generic kernel for all unmatched permutation patterns
+            // Specialized patterns (transpose, channel shuffle, attention transpose)
+            // are handled by the pattern matchers above
+            permute_kernel_generic::launch_unchecked::<F, R>(
+                client,
+                cube_count,
+                cube_dim,
+                input_arg,
+                output_arg,
+                ScalarArg::new(axes_0),
+                ScalarArg::new(axes_1),
+                ScalarArg::new(axes_2),
+                ScalarArg::new(axes_3),
+                ScalarArg::new(axes_4),
+                ScalarArg::new(axes_5),
+                rank as u32,
+            );
         }
     }
 }

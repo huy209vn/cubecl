@@ -31,6 +31,9 @@ use super::TensorHandle;
 use cubecl::frontend::TensorHandleRef;
 use cubecl::prelude::*;
 use cubecl_core as cubecl;
+use std::collections::HashSet;
+use std::env;
+use std::sync::{LazyLock, Mutex};
 
 // ================================
 // Constants & tuning parameters

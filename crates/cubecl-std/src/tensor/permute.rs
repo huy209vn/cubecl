@@ -697,24 +697,28 @@ fn plane_shuffle_transpose_small<F: Float>(
 ///
 /// Optimized for [B, C, H, W] → [B, H, W, C] with axes [0, 2, 3, 1].
 /// This is one of the most common permutations in computer vision.
-///
-/// Uses 4D grid (batch, channels, height) + thread dimension (width) to
-/// eliminate all division/modulo operations. Each thread handles one element
-/// with direct coordinate access from the grid position.
 #[cube(launch_unchecked)]
 fn channel_shuffle_nchw_to_nhwc<F: Float>(
     input: &Tensor<Line<F>>,
     output: &mut Tensor<Line<F>>,
+    batch: u32,
+    channels: u32,
+    height: u32,
     width: u32,
 ) {
-    // Direct 4D coordinates from grid - NO division/modulo!
-    let b = CUBE_POS_X;  // Batch index
-    let c = CUBE_POS_Y;  // Channel index
-    let h = CUBE_POS_Z;  // Height index
-    let w = UNIT_POS;    // Width index (thread within block)
+    let idx = ABSOLUTE_POS;
+    let total_elements = batch * channels * height * width;
 
-    // Bounds check only for width (others guaranteed by grid size)
-    if w < width {
+    if idx < total_elements {
+        // Decompose linear index into (b, c, h, w) for INPUT layout
+        let chw = channels * height * width;
+        let hw = height * width;
+
+        let b = idx / chw;
+        let c = (idx % chw) / hw;
+        let h = (idx % hw) / width;
+        let w = idx % width;
+
         // Read from input NCHW: [b, c, h, w]
         let in_offset = b * input.stride(0)
                       + c * input.stride(1)
@@ -823,9 +827,15 @@ fn tile_transpose_2d_kernel<F: Float>(
     cols: u32,
     #[comptime] tile_size: u32,
 ) {
-    // Direct 2D coordinates - NO division/modulo!
-    let tile_row_idx = CUBE_POS_X;
-    let tile_col_idx = CUBE_POS_Y;
+    let block_idx = CUBE_POS;
+
+    // Compute number of tiles
+    let _num_tile_rows = rows.div_ceil(tile_size);
+    let num_tile_cols = cols.div_ceil(tile_size);
+
+    // Decompose block index into (tile_row, tile_col)
+    let tile_row_idx = block_idx / num_tile_cols;
+    let tile_col_idx = block_idx % num_tile_cols;
 
     // Base position of this tile
     let tile_base_row = tile_row_idx * tile_size;
@@ -970,9 +980,14 @@ fn transpose_2d_movement2_kernel<F: Float>(
     #[comptime] tile_size: u32,
     #[comptime] _movement_size: u32,
 ) {
-    // Direct 2D coordinates - NO division/modulo!
-    let tile_row_idx = CUBE_POS_X;
-    let tile_col_idx = CUBE_POS_Y;
+    let block_idx = CUBE_POS;
+
+    // Dimensions are in ORIGINAL space, but tensor accesses are automatically vectorized
+    let _num_tile_rows = rows.div_ceil(tile_size);
+    let num_tile_cols = cols.div_ceil(tile_size);
+
+    let tile_row_idx = block_idx / num_tile_cols;
+    let tile_col_idx = block_idx % num_tile_cols;
 
     let tile_base_row = tile_row_idx * tile_size;
     let tile_base_col = tile_col_idx * tile_size;
@@ -1036,10 +1051,17 @@ fn batch_transpose_movement2_kernel<F: Float>(
     #[comptime] tile_size: u32,
     #[comptime] _movement_size: u32,
 ) {
-    // Direct 3D coordinates - NO division/modulo!
-    let batch_idx = CUBE_POS_X;
-    let tile_row_idx = CUBE_POS_Y;
-    let tile_col_idx = CUBE_POS_Z;
+    let block_idx = CUBE_POS;
+
+    // Dimensions are in ORIGINAL space, tensor accesses are automatically vectorized
+    let num_tile_rows = rows.div_ceil(tile_size);
+    let num_tile_cols = cols.div_ceil(tile_size);
+    let tiles_per_batch = num_tile_rows * num_tile_cols;
+
+    let batch_idx = block_idx / tiles_per_batch;
+    let tile_in_batch = block_idx % tiles_per_batch;
+    let tile_row_idx = tile_in_batch / num_tile_cols;
+    let tile_col_idx = tile_in_batch % num_tile_cols;
 
     let tile_base_row = tile_row_idx * tile_size;
     let tile_base_col = tile_col_idx * tile_size;
@@ -1145,14 +1167,10 @@ fn launch_scalar_tile_transpose_specialized<R: Runtime, F: Float, T: TileSize>(
     // Configure cube dimensions: tile_size × BLOCK_ROWS threads
     let cube_dim = CubeDim::new(tile_size, BLOCK_ROWS, 1);
 
-    // OPTIMIZED: Use 2D/3D grid to eliminate division/modulo
-    // 2D grid for single batch (tile_rows, tile_cols)
-    // 3D grid for multiple batches (batches, tile_rows, tile_cols)
-    let cube_count = if num_batches == 1 {
-        CubeCount::Static(num_tile_rows, num_tile_cols, 1)
-    } else {
-        CubeCount::Static(num_batches, num_tile_rows, num_tile_cols)
-    };
+    // Use 1D grid - calculate total number of tiles across all batches
+    let tiles_per_batch = num_tile_rows * num_tile_cols;
+    let total_tiles = num_batches * tiles_per_batch;
+    let cube_count = CubeCount::Static(total_tiles, 1, 1);
 
     // Use scalar access for transpose - irregular memory patterns don't benefit from vectorization
     let vectorization = 1;
@@ -1282,18 +1300,15 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
     match axes {
         [0, 2, 3, 1] => {
             // PHASE 3: Channel shuffle NCHW → NHWC
-            // OPTIMIZED: Use 4D grid to eliminate ALL division/modulo operations
             let batch = input.shape[0] as u32;
             let channels = input.shape[1] as u32;
             let height = input.shape[2] as u32;
             let width = input.shape[3] as u32;
 
-            // Use 3D grid (batch, channels, height) + thread dimension for width
-            // This allows direct access to (b, c, h) from grid, w from thread position
-            // Maximum threads per block is typically 1024, but use 256 for better occupancy
-            let threads_per_block = if width < 256 { width } else { 256 };
-            let cube_dim = CubeDim::new(threads_per_block, 1, 1);
-            let cube_count = CubeCount::Static(batch, channels, height);
+            let cube_dim = CubeDim::default();
+            let total_elements = batch * channels * height * width;
+            let cube_count_x = total_elements.div_ceil(cube_dim.x);
+            let cube_count = CubeCount::Static(cube_count_x, 1, 1);
 
             let input_arg = unsafe {
                 TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
@@ -1309,6 +1324,9 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
                     cube_dim,
                     input_arg,
                     output_arg,
+                    ScalarArg::new(batch),
+                    ScalarArg::new(channels),
+                    ScalarArg::new(height),
                     ScalarArg::new(width),
                 );
             }
@@ -1612,12 +1630,10 @@ fn launch_vectorized_tile_transpose<R: Runtime, F: Float>(
     // Configure cube dimensions
     let cube_dim = CubeDim::new(tile_size, BLOCK_ROWS, 1);
 
-    // OPTIMIZED: Use 3D grid for batched transpose (2D for non-batched)
-    let cube_count = if num_batches == 1 {
-        CubeCount::Static(num_tile_rows, num_tile_cols, 1) // 2D grid for single batch
-    } else {
-        CubeCount::Static(num_batches, num_tile_rows, num_tile_cols) // 3D grid for multiple batches
-    };
+    // Use 1D grid - calculate total number of tiles across all batches
+    let tiles_per_batch = num_tile_rows * num_tile_cols;
+    let total_tiles = num_batches * tiles_per_batch;
+    let cube_count = CubeCount::Static(total_tiles, 1, 1);
 
     // CRITICAL FIX: Pass movement_size as vectorization to TensorArg
     // This tells CubeCL to interpret tensor accesses as vectorized

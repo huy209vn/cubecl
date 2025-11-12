@@ -996,6 +996,8 @@ fn attention_transpose_kernel<F: Float>(
 // ===========================================================
 
 /// 2D tile transpose: [H, W] → [W, H]
+///
+/// **OPTIMIZED:** Uses 2D grid to avoid expensive division/modulo operations.
 #[cube(launch_unchecked)]
 fn tile_transpose_2d_kernel<F: Float>(
     input: &Tensor<Line<F>>,
@@ -1004,15 +1006,9 @@ fn tile_transpose_2d_kernel<F: Float>(
     cols: u32,
     #[comptime] tile_size: u32,
 ) {
-    let block_idx = CUBE_POS;
-
-    // Compute number of tiles
-    let _num_tile_rows = rows.div_ceil(tile_size);
-    let num_tile_cols = cols.div_ceil(tile_size);
-
-    // Decompose block index into (tile_row, tile_col)
-    let tile_row_idx = block_idx / num_tile_cols;
-    let tile_col_idx = block_idx % num_tile_cols;
+    // Direct 2D coordinates - NO division/modulo!
+    let tile_row_idx = CUBE_POS_X;
+    let tile_col_idx = CUBE_POS_Y;
 
     // Base position of this tile
     let tile_base_row = tile_row_idx * tile_size;
@@ -1064,6 +1060,8 @@ fn tile_transpose_2d_kernel<F: Float>(
 /// Uses cooperative loading: threads in a block work together to load
 /// a tile into shared memory, then write it transposed to global memory.
 ///
+/// **OPTIMIZED:** Uses 3D grid to avoid expensive division/modulo operations.
+///
 /// # References
 /// - NVIDIA: "An Efficient Matrix Transpose in CUDA C/C++"
 #[cube(launch_unchecked)]
@@ -1075,20 +1073,12 @@ fn batch_transpose_kernel<F: Float>(
     #[comptime] tile_size: u32,
 ) {
     // Each block handles one tile
-    // Block grid: [num_batches * num_tile_rows * num_tile_cols]
+    // Block grid: 3D [num_batches, num_tile_rows, num_tile_cols]
+    // Direct access to coordinates - NO division/modulo!
 
-    let block_idx = CUBE_POS;
-
-    // Compute number of tiles
-    let num_tile_rows = rows.div_ceil(tile_size);
-    let num_tile_cols = cols.div_ceil(tile_size);
-    let tiles_per_batch = num_tile_rows * num_tile_cols;
-
-    // Decompose block index into (batch, tile_row, tile_col)
-    let batch_idx = block_idx / tiles_per_batch;
-    let tile_in_batch = block_idx % tiles_per_batch;
-    let tile_row_idx = tile_in_batch / num_tile_cols;
-    let tile_col_idx = tile_in_batch % num_tile_cols;
+    let batch_idx = CUBE_POS_X;
+    let tile_row_idx = CUBE_POS_Y;
+    let tile_col_idx = CUBE_POS_Z;
 
     // Base position of this tile in the global matrix
     let tile_base_row = tile_row_idx * tile_size;
@@ -1156,6 +1146,8 @@ fn batch_transpose_kernel<F: Float>(
 /// Vectorized variant for 2D transpose using 2-element or 4-element loads.
 /// For [H, W] -> [W, H] with axes [1, 0]
 ///
+/// **OPTIMIZED:** Uses 2D grid to avoid expensive division/modulo operations.
+///
 /// NOTE: Tensor is passed with vectorization set, so tensor.shape() and strides
 /// are already in "vectorized space" (divided by movement_size automatically).
 #[cube(launch_unchecked)]
@@ -1167,14 +1159,9 @@ fn transpose_2d_movement2_kernel<F: Float>(
     #[comptime] tile_size: u32,
     #[comptime] _movement_size: u32,
 ) {
-    let block_idx = CUBE_POS;
-
-    // Dimensions are in ORIGINAL space, but tensor accesses are automatically vectorized
-    let _num_tile_rows = rows.div_ceil(tile_size);
-    let num_tile_cols = cols.div_ceil(tile_size);
-
-    let tile_row_idx = block_idx / num_tile_cols;
-    let tile_col_idx = block_idx % num_tile_cols;
+    // Direct 2D coordinates - NO division/modulo!
+    let tile_row_idx = CUBE_POS_X;
+    let tile_col_idx = CUBE_POS_Y;
 
     let tile_base_row = tile_row_idx * tile_size;
     let tile_base_col = tile_col_idx * tile_size;
@@ -1228,6 +1215,8 @@ fn transpose_2d_movement2_kernel<F: Float>(
 /// Vectorized variant for 3D batch transpose using 2-element or 4-element loads.
 /// For [B, H, W] -> [B, W, H] with axes [0, 2, 1]
 ///
+/// **OPTIMIZED:** Uses 3D grid to avoid expensive division/modulo operations.
+///
 /// NOTE: Tensor is passed with vectorization set, so tensor accesses are
 /// automatically vectorized by TensorArg.
 #[cube(launch_unchecked)]
@@ -1239,17 +1228,10 @@ fn batch_transpose_movement2_kernel<F: Float>(
     #[comptime] tile_size: u32,
     #[comptime] _movement_size: u32,
 ) {
-    let block_idx = CUBE_POS;
-
-    // Dimensions are in ORIGINAL space, tensor accesses are automatically vectorized
-    let num_tile_rows = rows.div_ceil(tile_size);
-    let num_tile_cols = cols.div_ceil(tile_size);
-    let tiles_per_batch = num_tile_rows * num_tile_cols;
-
-    let batch_idx = block_idx / tiles_per_batch;
-    let tile_in_batch = block_idx % tiles_per_batch;
-    let tile_row_idx = tile_in_batch / num_tile_cols;
-    let tile_col_idx = tile_in_batch % num_tile_cols;
+    // Direct 3D coordinates - NO division/modulo!
+    let batch_idx = CUBE_POS_X;
+    let tile_row_idx = CUBE_POS_Y;
+    let tile_col_idx = CUBE_POS_Z;
 
     let tile_base_row = tile_row_idx * tile_size;
     let tile_base_col = tile_col_idx * tile_size;
@@ -1351,15 +1333,26 @@ fn launch_scalar_tile_transpose_specialized<R: Runtime, F: Float, T: TileSize>(
     // Compute tile grid dimensions
     let num_tile_rows = rows.div_ceil(tile_size);
     let num_tile_cols = cols.div_ceil(tile_size);
-    let blocks_per_batch = num_tile_rows * num_tile_cols;
-    let total_blocks = num_batches * blocks_per_batch;
 
     // Configure cube dimensions: tile_size × BLOCK_ROWS threads
     let cube_dim = CubeDim::new(tile_size, BLOCK_ROWS, 1);
-    let cube_count = CubeCount::Static(total_blocks, 1, 1);
 
-    // Create tensor arguments with vectorization = 1 (scalar)
-    let vectorization = 1;
+    // OPTIMIZED: Use 2D/3D grid to eliminate division/modulo
+    // 2D grid for single batch (tile_rows, tile_cols)
+    // 3D grid for multiple batches (batches, tile_rows, tile_cols)
+    let cube_count = if num_batches == 1 {
+        CubeCount::Static(num_tile_rows, num_tile_cols, 1)
+    } else {
+        CubeCount::Static(num_batches, num_tile_rows, num_tile_cols)
+    };
+
+    // Create tensor arguments with data-type-aware vectorization
+    // F16/BF16 needs vectorization to achieve proper memory bandwidth
+    let vectorization = if std::mem::size_of::<F>() == 2 {
+        4 // F16/BF16: 4-element vectors (8-byte loads)
+    } else {
+        1 // F32/F64: Scalar access is sufficient
+    };
 
     let input_arg = unsafe {
         TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
@@ -1580,12 +1573,19 @@ fn launch_permute_kernel<R: Runtime, F: Float>(
 ) {
     let rank = input.shape.len();
 
-    // Determine vectorization factor
-    // For permute operations, we use scalar access (vectorization = 1) because
-    // the memory access patterns are irregular and don't benefit from vectorization.
-    // Transpose operations read and write with different strides, breaking the
-    // regular access patterns required for efficient vectorized loads/stores.
-    let vectorization = 1;
+    // Determine vectorization factor based on data type size
+    // F16/BF16 (2 bytes): MUST use vectorization to achieve proper memory bandwidth
+    //   - Scalar access = 2-byte loads (too small for memory controllers)
+    //   - vectorization=4 = 8-byte loads (optimal, matches 2× F32 bandwidth)
+    // F32 (4 bytes): Scalar access is sufficient for irregular patterns
+    //   - Scalar access = 4-byte loads (already optimal)
+    // F64 (8 bytes): Scalar access is optimal
+    //   - Scalar access = 8-byte loads (maximum efficiency)
+    let vectorization = if std::mem::size_of::<F>() == 2 {
+        4 // F16/BF16: Use 4-element vectors (4×2 = 8-byte loads)
+    } else {
+        1 // F32/F64: Scalar access is sufficient
+    };
 
     // Compute total number of output elements
     let count: usize = output.shape.iter().product();
@@ -1709,12 +1709,17 @@ fn launch_batch_transpose_kernel_simple<R: Runtime, F: Float>(
 
     if use_plane_shuffle {
         // Ultra-fast plane shuffle path (no shared memory, no sync!)
-        let vectorization = 1;
+        // Use data-type-aware vectorization for F16/BF16
+        let vectorization = if std::mem::size_of::<F>() == 2 {
+            4 // F16/BF16: 4-element vectors (8-byte loads)
+        } else {
+            1 // F32/F64: Scalar access is sufficient
+        };
         let input_arg = unsafe {
             TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
         };
         let output_arg = unsafe {
-            TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
+            TensorArg::from_raw_parts::<F>(input.handle, output.strides, output.shape, vectorization)
         };
 
         // Launch with one plane per matrix
@@ -1855,12 +1860,16 @@ fn launch_vectorized_tile_transpose<R: Runtime, F: Float>(
     // Compute tile grid dimensions in ORIGINAL (non-vectorized) space
     let num_tile_rows = rows.div_ceil(tile_size);
     let num_tile_cols = cols.div_ceil(tile_size);
-    let blocks_per_batch = num_tile_rows * num_tile_cols;
-    let total_blocks = num_batches * blocks_per_batch;
 
     // Configure cube dimensions
     let cube_dim = CubeDim::new(tile_size, BLOCK_ROWS, 1);
-    let cube_count = CubeCount::Static(total_blocks, 1, 1);
+
+    // OPTIMIZED: Use 3D grid for batched transpose (2D for non-batched)
+    let cube_count = if num_batches == 1 {
+        CubeCount::Static(num_tile_rows, num_tile_cols, 1) // 2D grid for single batch
+    } else {
+        CubeCount::Static(num_batches, num_tile_rows, num_tile_cols) // 3D grid for multiple batches
+    };
 
     // CRITICAL FIX: Pass movement_size as vectorization to TensorArg
     // This tells CubeCL to interpret tensor accesses as vectorized

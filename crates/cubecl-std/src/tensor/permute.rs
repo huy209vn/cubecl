@@ -1154,13 +1154,8 @@ fn launch_scalar_tile_transpose_specialized<R: Runtime, F: Float, T: TileSize>(
         CubeCount::Static(num_batches, num_tile_rows, num_tile_cols)
     };
 
-    // Create tensor arguments with data-type-aware vectorization
-    // F16/BF16 needs vectorization to achieve proper memory bandwidth
-    let vectorization = if std::mem::size_of::<F>() == 2 {
-        4 // F16/BF16: 4-element vectors (8-byte loads)
-    } else {
-        1 // F32/F64: Scalar access is sufficient
-    };
+    // Use scalar access for transpose - irregular memory patterns don't benefit from vectorization
+    let vectorization = 1;
 
     let input_arg = unsafe {
         TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
@@ -1378,19 +1373,9 @@ fn launch_permute_kernel<R: Runtime, F: Float>(
 ) {
     let rank = input.shape.len();
 
-    // Determine vectorization factor based on data type size
-    // F16/BF16 (2 bytes): MUST use vectorization to achieve proper memory bandwidth
-    //   - Scalar access = 2-byte loads (too small for memory controllers)
-    //   - vectorization=4 = 8-byte loads (optimal, matches 2× F32 bandwidth)
-    // F32 (4 bytes): Scalar access is sufficient for irregular patterns
-    //   - Scalar access = 4-byte loads (already optimal)
-    // F64 (8 bytes): Scalar access is optimal
-    //   - Scalar access = 8-byte loads (maximum efficiency)
-    let vectorization = if std::mem::size_of::<F>() == 2 {
-        4 // F16/BF16: Use 4-element vectors (4×2 = 8-byte loads)
-    } else {
-        1 // F32/F64: Scalar access is sufficient
-    };
+    // Use scalar access for permute - irregular memory access patterns
+    // don't benefit from vectorization
+    let vectorization = 1;
 
     // Compute total number of output elements
     let count: usize = output.shape.iter().product();
@@ -1476,12 +1461,8 @@ fn launch_batch_transpose_kernel_simple<R: Runtime, F: Float>(
 
     if use_plane_shuffle {
         // Ultra-fast plane shuffle path (no shared memory, no sync!)
-        // Use data-type-aware vectorization for F16/BF16
-        let vectorization = if std::mem::size_of::<F>() == 2 {
-            4 // F16/BF16: 4-element vectors (8-byte loads)
-        } else {
-            1 // F32/F64: Scalar access is sufficient
-        };
+        // IMPORTANT: Plane shuffle requires scalar access - can't vectorize shuffle operations
+        let vectorization = 1;
         let input_arg = unsafe {
             TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
         };

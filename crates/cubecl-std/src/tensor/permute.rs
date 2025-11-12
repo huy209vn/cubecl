@@ -635,14 +635,10 @@ fn permute_kernel_generic<F: Float>(
     }
 }
 
-// ===========================================================
-// SECTION II-A — Plane Shuffle Kernels (PHASE 4)
-// ===========================================================
-
-/// **PHASE 4: Plane Shuffle Transpose for Tiny Matrices**
+/// Plane shuffle transpose for tiny matrices (≤32 elements).
 ///
-/// Ultra-fast transpose for TINY matrices (≤32 elements) using warp/subgroup shuffles.
-/// NO shared memory, NO sync barriers - just register-to-register exchanges!
+/// Ultra-fast transpose using warp/subgroup shuffles with no shared memory
+/// or synchronization barriers - just register-to-register exchanges.
 ///
 /// CRITICAL CONSTRAINT: Warp size is 32, so we can ONLY handle matrices with ≤32 elements!
 /// Examples: 4×4 (16 elem), 4×8 (32 elem), 8×4 (32 elem), 2×16 (32 elem)
@@ -697,23 +693,14 @@ fn plane_shuffle_transpose_small<F: Float>(
     }
 }
 
-// ===========================================================
-// SECTION II-B — Specialized Pattern Kernels (PHASE 3)
-// ===========================================================
-
-/// **Channel Shuffle Kernel: NCHW → NHWC**
+/// Channel shuffle kernel for NCHW → NHWC layout conversion.
 ///
-/// Optimized kernel for [B, C, H, W] → [B, H, W, C] with axes [0, 2, 3, 1]
+/// Optimized for [B, C, H, W] → [B, H, W, C] with axes [0, 2, 3, 1].
 /// This is one of the most common permutations in computer vision.
 ///
-/// **OPTIMIZED:** Uses 4D grid to eliminate ALL division/modulo operations.
-///
-/// Strategy:
-/// - Use 3D grid (batch, channels, height) + thread dimension (width)
-/// - Direct access to coordinates - NO expensive integer division!
-/// - Each thread handles ONE element at position (b, c, h, w)
-/// - Direct read from NCHW layout: input[b, c, h, w]
-/// - Direct write to NHWC layout: output[b, h, w, c]
+/// Uses 4D grid (batch, channels, height) + thread dimension (width) to
+/// eliminate all division/modulo operations. Each thread handles one element
+/// with direct coordinate access from the grid position.
 #[cube(launch_unchecked)]
 fn channel_shuffle_nchw_to_nhwc<F: Float>(
     input: &Tensor<Line<F>>,
@@ -744,16 +731,14 @@ fn channel_shuffle_nchw_to_nhwc<F: Float>(
     }
 }
 
-/// **Attention Transpose Kernel: [B, H, N, D] → [B, N, H, D]**
+/// Attention transpose kernel for [B, H, N, D] → [B, N, H, D].
 ///
-/// Optimized kernel for swapping middle two dimensions (axes [0, 2, 1, 3])
+/// Optimized for swapping middle two dimensions (axes [0, 2, 1, 3]).
 /// This is the standard multi-head attention transpose pattern.
 ///
-/// Strategy:
-/// - Treat as batched 2D transpose: (B×D) batches of (H×N) matrices
-/// - Use shared memory tiling similar to batch_transpose_kernel
-/// - Use 3D grid to directly access (tile, d, b) without expensive division/modulo
-/// - Each block handles one tile of the H×N matrix for one (b, d) pair
+/// Uses shared memory tiling with 3D grid launch to avoid expensive
+/// division/modulo operations. Each block handles one tile of an H×N
+/// matrix for a specific (batch, head_dim) pair.
 #[cube(launch_unchecked)]
 fn attention_transpose_kernel<F: Float>(
     input: &Tensor<Line<F>>,
@@ -826,13 +811,10 @@ fn attention_transpose_kernel<F: Float>(
     }
 }
 
-// ===========================================================
-// SECTION III — Tile-based Transpose Kernels (Optimized Path)
-// ===========================================================
-
-/// 2D tile transpose: [H, W] → [W, H]
+/// 2D tile transpose kernel for [H, W] → [W, H].
 ///
-/// **OPTIMIZED:** Uses 2D grid to avoid expensive division/modulo operations.
+/// Uses shared memory tiling with 2D grid launch to avoid expensive
+/// division/modulo operations.
 #[cube(launch_unchecked)]
 fn tile_transpose_2d_kernel<F: Float>(
     input: &Tensor<Line<F>>,
@@ -890,15 +872,12 @@ fn tile_transpose_2d_kernel<F: Float>(
     }
 }
 
-/// Shared-memory tile-based transpose for (B, X, Y) → (B, Y, X).
+/// Batched transpose kernel for (B, X, Y) → (B, Y, X).
 ///
-/// Uses cooperative loading: threads in a block work together to load
-/// a tile into shared memory, then write it transposed to global memory.
+/// Uses shared memory tiling with 3D grid launch. Threads cooperatively
+/// load tiles into shared memory then write transposed to global memory.
 ///
-/// **OPTIMIZED:** Uses 3D grid to avoid expensive division/modulo operations.
-///
-/// # References
-/// - NVIDIA: "An Efficient Matrix Transpose in CUDA C/C++"
+/// Based on NVIDIA's "An Efficient Matrix Transpose in CUDA C/C++".
 #[cube(launch_unchecked)]
 fn batch_transpose_kernel<F: Float>(
     input: &Tensor<Line<F>>,
@@ -978,13 +957,10 @@ fn batch_transpose_kernel<F: Float>(
     }
 }
 
-/// Vectorized variant for 2D transpose using 2-element or 4-element loads.
-/// For [H, W] -> [W, H] with axes [1, 0]
+/// Vectorized 2D transpose kernel for [H, W] → [W, H].
 ///
-/// **OPTIMIZED:** Uses 2D grid to avoid expensive division/modulo operations.
-///
-/// NOTE: Tensor is passed with vectorization set, so tensor.shape() and strides
-/// are already in "vectorized space" (divided by movement_size automatically).
+/// Uses 2-element or 4-element vectorized loads/stores with 2D grid launch.
+/// Tensor accesses are automatically vectorized by TensorArg.
 #[cube(launch_unchecked)]
 fn transpose_2d_movement2_kernel<F: Float>(
     input: &Tensor<Line<F>>,
@@ -1047,13 +1023,10 @@ fn transpose_2d_movement2_kernel<F: Float>(
     }
 }
 
-/// Vectorized variant for 3D batch transpose using 2-element or 4-element loads.
-/// For [B, H, W] -> [B, W, H] with axes [0, 2, 1]
+/// Vectorized batched transpose kernel for [B, H, W] → [B, W, H].
 ///
-/// **OPTIMIZED:** Uses 3D grid to avoid expensive division/modulo operations.
-///
-/// NOTE: Tensor is passed with vectorization set, so tensor accesses are
-/// automatically vectorized by TensorArg.
+/// Uses 2-element or 4-element vectorized loads/stores with 3D grid launch.
+/// Tensor accesses are automatically vectorized by TensorArg.
 #[cube(launch_unchecked)]
 fn batch_transpose_movement2_kernel<F: Float>(
     input: &Tensor<Line<F>>,
@@ -1347,10 +1320,7 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             true
         }
         [0, 2, 1, 3] => {
-            eprintln!("✓ CALLING attention_transpose_kernel for shape [{}, {}, {}, {}]",
-                     input.shape[0], input.shape[1], input.shape[2], input.shape[3]);
-            // PHASE 3: Attention transpose [B, H, N, D] → [B, N, H, D]
-            // OPTIMIZED: Use 3D grid to avoid expensive division/modulo operations
+            // Attention transpose [B, H, N, D] → [B, N, H, D]
             let batch = input.shape[0] as u32;
             let heads = input.shape[1] as u32;
             let seq_len = input.shape[2] as u32;
@@ -1516,7 +1486,7 @@ fn launch_batch_transpose_kernel_simple<R: Runtime, F: Float>(
             TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
         };
         let output_arg = unsafe {
-            TensorArg::from_raw_parts::<F>(input.handle, output.strides, output.shape, vectorization)
+            TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
         };
 
         // Launch with one plane per matrix

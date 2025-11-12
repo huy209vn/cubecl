@@ -917,87 +917,77 @@ fn channel_shuffle_nchw_to_nhwc<F: Float>(
 /// Strategy:
 /// - Treat as batched 2D transpose: (B×D) batches of (H×N) matrices
 /// - Use shared memory tiling similar to batch_transpose_kernel
+/// - Use 3D grid to directly access (tile, d, b) without expensive division/modulo
 /// - Each block handles one tile of the H×N matrix for one (b, d) pair
 #[cube(launch_unchecked)]
 fn attention_transpose_kernel<F: Float>(
     input: &Tensor<Line<F>>,
     output: &mut Tensor<Line<F>>,
-    batch: u32,
     heads: u32,
     seq_len: u32,
-    head_dim: u32,
     #[comptime] tile_size: u32,
 ) {
-    let block_idx = CUBE_POS;
+    // Use 3D grid coordinates to avoid expensive division/modulo
+    let tile_idx = CUBE_POS_X;  // Tile index within the H×N matrix
+    let d = CUBE_POS_Y;          // Head dimension index
+    let b = CUBE_POS_Z;          // Batch index
+
     let thread_x = UNIT_POS_X;
     let thread_y = UNIT_POS_Y;
 
     // Compute number of tiles for the H×N matrix
-    let num_tile_rows = heads.div_ceil(tile_size);
     let num_tile_cols = seq_len.div_ceil(tile_size);
-    let tiles_per_matrix = num_tile_rows * num_tile_cols;
 
-    // Total matrices = B × D
-    let num_matrices = batch * head_dim;
+    // Decompose tile index into (row, col)
+    let tile_row_idx = tile_idx / num_tile_cols;
+    let tile_col_idx = tile_idx % num_tile_cols;
 
-    // Decompose block index
-    let matrix_idx = block_idx / tiles_per_matrix;
-    let tile_in_matrix = block_idx % tiles_per_matrix;
+    let tile_base_row = tile_row_idx * tile_size;
+    let tile_base_col = tile_col_idx * tile_size;
 
-    if matrix_idx < num_matrices {
-        let b = matrix_idx / head_dim;
-        let d = matrix_idx % head_dim;
+    // Shared memory tile with padding
+    let padded_stride = tile_size + 1;
+    let mut tile = SharedMemory::<F>::new_lined(padded_stride * tile_size, 1u32);
 
-        let tile_row_idx = tile_in_matrix / num_tile_cols;
-        let tile_col_idx = tile_in_matrix % num_tile_cols;
+    // Phase 1: Load from input [B, H, N, D] into shared memory
+    let mut row_offset = thread_y;
+    while row_offset < tile_size {
+        let global_h = tile_base_row + row_offset;
+        let global_n = tile_base_col + thread_x;
 
-        let tile_base_row = tile_row_idx * tile_size;
-        let tile_base_col = tile_col_idx * tile_size;
+        if global_h < heads && global_n < seq_len {
+            let in_offset = b * input.stride(0)
+                          + global_h * input.stride(1)
+                          + global_n * input.stride(2)
+                          + d * input.stride(3);
 
-        // Shared memory tile with padding
-        let padded_stride = tile_size + 1;
-        let mut tile = SharedMemory::<F>::new_lined(padded_stride * tile_size, 1u32);
-
-        // Phase 1: Load from input [B, H, N, D] into shared memory
-        let mut row_offset = thread_y;
-        while row_offset < tile_size {
-            let global_h = tile_base_row + row_offset;
-            let global_n = tile_base_col + thread_x;
-
-            if global_h < heads && global_n < seq_len {
-                let in_offset = b * input.stride(0)
-                              + global_h * input.stride(1)
-                              + global_n * input.stride(2)
-                              + d * input.stride(3);
-
-                let tile_idx = row_offset * padded_stride + thread_x;
-                tile[tile_idx] = input[in_offset];
-            }
-
-            row_offset += BLOCK_ROWS;
+            let tile_idx_mem = row_offset * padded_stride + thread_x;
+            tile[tile_idx_mem] = input[in_offset];
         }
 
-        sync_cube();
+        row_offset += BLOCK_ROWS;
+    }
 
-        // Phase 2: Write to output [B, N, H, D] with transpose
-        let mut col_offset = thread_y;
-        while col_offset < tile_size {
-            let global_n = tile_base_col + col_offset;
-            let global_h = tile_base_row + thread_x;
+    sync_cube();
 
-            if global_n < seq_len && global_h < heads {
-                let tile_idx = thread_x * padded_stride + col_offset;
+    // Phase 2: Write to output [B, N, H, D] with transpose
+    let mut col_offset = thread_y;
+    while col_offset < tile_size {
+        let global_n = tile_base_col + col_offset;
+        let global_h = tile_base_row + thread_x;
 
-                let out_offset = b * output.stride(0)
-                               + global_n * output.stride(1)
-                               + global_h * output.stride(2)
-                               + d * output.stride(3);
+        if global_n < seq_len && global_h < heads {
+            let tile_idx_mem = thread_x * padded_stride + col_offset;
 
-                output[out_offset] = tile[tile_idx];
-            }
+            let out_offset = b * output.stride(0)
+                           + global_n * output.stride(1)
+                           + global_h * output.stride(2)
+                           + d * output.stride(3);
 
-            col_offset += BLOCK_ROWS;
+            output[out_offset] = tile[tile_idx_mem];
         }
+
+        col_offset += BLOCK_ROWS;
     }
 }
 
@@ -1532,6 +1522,7 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             eprintln!("✓ CALLING attention_transpose_kernel for shape [{}, {}, {}, {}]",
                      input.shape[0], input.shape[1], input.shape[2], input.shape[3]);
             // PHASE 3: Attention transpose [B, H, N, D] → [B, N, H, D]
+            // OPTIMIZED: Use 3D grid to avoid expensive division/modulo operations
             let batch = input.shape[0] as u32;
             let heads = input.shape[1] as u32;
             let seq_len = input.shape[2] as u32;
@@ -1541,11 +1532,11 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let num_tile_rows = heads.div_ceil(tile_size);
             let num_tile_cols = seq_len.div_ceil(tile_size);
             let tiles_per_matrix = num_tile_rows * num_tile_cols;
-            let num_matrices = batch * head_dim;
-            let total_blocks = num_matrices * tiles_per_matrix;
 
+            // Use 3D grid: (tiles, head_dim, batch)
+            // This allows kernel to directly access b, d, tile from CUBE_POS_X/Y/Z
             let cube_dim_2d = CubeDim::new(tile_size, BLOCK_ROWS, 1);
-            let cube_count_2d = CubeCount::Static(total_blocks, 1, 1);
+            let cube_count_3d = CubeCount::Static(tiles_per_matrix, head_dim, batch);
 
             let input_arg = unsafe {
                 TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
@@ -1557,14 +1548,12 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             unsafe {
                 attention_transpose_kernel::launch_unchecked::<F, R>(
                     client,
-                    cube_count_2d,
+                    cube_count_3d,
                     cube_dim_2d,
                     input_arg,
                     output_arg,
-                    ScalarArg::new(batch),
                     ScalarArg::new(heads),
                     ScalarArg::new(seq_len),
-                    ScalarArg::new(head_dim),
                     tile_size,
                 );
             }

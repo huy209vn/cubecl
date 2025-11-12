@@ -1501,6 +1501,16 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let height = input.shape[2] as u32;
             let width = input.shape[3] as u32;
 
+            // Calculate vectorization based on alignment
+            // Channel shuffle reads/writes in width dimension - check alignment there
+            let vectorization = if width.is_multiple_of(4) {
+                4
+            } else if width.is_multiple_of(2) {
+                2
+            } else {
+                1
+            };
+
             let cube_dim = CubeDim::default();
             let total_elements = batch * channels * height * width;
             let cube_count_x = total_elements.div_ceil(cube_dim.x);
@@ -1534,6 +1544,16 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let heads = input.shape[1] as u32;
             let seq_len = input.shape[2] as u32;
             let head_dim = input.shape[3] as u32;
+
+            // Calculate vectorization based on alignment
+            // Attention transpose transposes H×N - check alignment of both dimensions
+            let vectorization = if heads.is_multiple_of(4) && seq_len.is_multiple_of(4) {
+                4
+            } else if heads.is_multiple_of(2) && seq_len.is_multiple_of(2) {
+                2
+            } else {
+                1
+            };
 
             let tile_size = TILE_SIZE_MOV4; // 32×32 tiles
             let num_tile_rows = heads.div_ceil(tile_size);

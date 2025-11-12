@@ -179,22 +179,21 @@ fn run_benchmark_suite<R: Runtime>(device: R::Device, backend_name: &str) {
     bench_permute::<R, f16>(&device, vec![128, 64, 64], vec![2, 0, 1], "F16", "naive_permute (fallback)");
     println!();
 
-    // PHASE 3: Channel shuffle NCHW → NHWC [0,2,3,1]
-    println!("TEST: ⭐ PHASE 3 - Channel Shuffle [32, 256, 56, 56] axes=[0,2,3,1] NCHW→NHWC");
+    // Complex 4D permutations (using tiled generic kernel)
+    println!("TEST: Channel Shuffle [32, 256, 56, 56] axes=[0,2,3,1] NCHW→NHWC");
     println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
     println!("-----|-------------|-----------------|-------|-------");
-    bench_permute::<R, f32>(&device, vec![32, 256, 56, 56], vec![0, 2, 3, 1], "F32", "channel_shuffle_nchw_to_nhwc (Phase 3)");
+    bench_permute::<R, f32>(&device, vec![32, 256, 56, 56], vec![0, 2, 3, 1], "F32", "tiled_permute_kernel_4d");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![32, 256, 56, 56], vec![0, 2, 3, 1], "F16", "channel_shuffle_nchw_to_nhwc (Phase 3)");
+    bench_permute::<R, f16>(&device, vec![32, 256, 56, 56], vec![0, 2, 3, 1], "F16", "tiled_permute_kernel_4d");
     println!();
 
-    // PHASE 3: Attention transpose [B, H, N, D] → [B, N, H, D] [0,2,1,3]
-    println!("TEST: ⭐ PHASE 3 - Attention Transpose [8, 32, 512, 64] axes=[0,2,1,3]");
+    println!("TEST: Attention Transpose [8, 32, 512, 64] axes=[0,2,1,3]");
     println!("Type |   Time(ms)  | Bandwidth(GB/s) | Iters | Kernel");
     println!("-----|-------------|-----------------|-------|-------");
-    bench_permute::<R, f32>(&device, vec![8, 32, 512, 64], vec![0, 2, 1, 3], "F32", "attention_transpose_kernel (Phase 3)");
+    bench_permute::<R, f32>(&device, vec![8, 32, 512, 64], vec![0, 2, 1, 3], "F32", "tiled_permute_kernel_4d");
     #[cfg(feature = "cuda")]
-    bench_permute::<R, f16>(&device, vec![8, 32, 512, 64], vec![0, 2, 1, 3], "F16", "attention_transpose_kernel (Phase 3)");
+    bench_permute::<R, f16>(&device, vec![8, 32, 512, 64], vec![0, 2, 1, 3], "F16", "tiled_permute_kernel_4d");
     println!();
 
     // PHASE 4: Tiny matrix plane shuffle (≤32 elements = warp size)

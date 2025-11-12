@@ -1529,6 +1529,8 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             true
         }
         [0, 2, 1, 3] => {
+            eprintln!("✓ CALLING attention_transpose_kernel for shape [{}, {}, {}, {}]",
+                     input.shape[0], input.shape[1], input.shape[2], input.shape[3]);
             // PHASE 3: Attention transpose [B, H, N, D] → [B, N, H, D]
             let batch = input.shape[0] as u32;
             let heads = input.shape[1] as u32;

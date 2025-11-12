@@ -858,6 +858,150 @@ fn plane_shuffle_transpose_small<F: Float>(
 }
 
 // ===========================================================
+// SECTION II-B — Specialized Pattern Kernels (PHASE 3)
+// ===========================================================
+
+/// **Channel Shuffle Kernel: NCHW → NHWC**
+///
+/// Optimized kernel for [B, C, H, W] → [B, H, W, C] with axes [0, 2, 3, 1]
+/// This is one of the most common permutations in computer vision.
+///
+/// Strategy:
+/// - Each thread handles ONE element at position (b, c, h, w)
+/// - Direct read from NCHW layout: input[b, c, h, w]
+/// - Direct write to NHWC layout: output[b, h, w, c]
+/// - Fully parallelized - NO loops!
+#[cube(launch_unchecked)]
+fn channel_shuffle_nchw_to_nhwc<F: Float>(
+    input: &Tensor<Line<F>>,
+    output: &mut Tensor<Line<F>>,
+    batch: u32,
+    channels: u32,
+    height: u32,
+    width: u32,
+) {
+    let idx = ABSOLUTE_POS;
+    let total_elements = batch * channels * height * width;
+
+    if idx < total_elements {
+        // Decompose linear index into (b, c, h, w) for INPUT layout
+        let chw = channels * height * width;
+        let hw = height * width;
+
+        let b = idx / chw;
+        let c = (idx % chw) / hw;
+        let h = (idx % hw) / width;
+        let w = idx % width;
+
+        // Read from input NCHW: [b, c, h, w]
+        let in_offset = b * input.stride(0)
+                      + c * input.stride(1)
+                      + h * input.stride(2)
+                      + w * input.stride(3);
+        let value = input[in_offset];
+
+        // Write to output NHWC: [b, h, w, c]
+        let out_offset = b * output.stride(0)
+                       + h * output.stride(1)
+                       + w * output.stride(2)
+                       + c * output.stride(3);
+        output[out_offset] = value;
+    }
+}
+
+/// **Attention Transpose Kernel: [B, H, N, D] → [B, N, H, D]**
+///
+/// Optimized kernel for swapping middle two dimensions (axes [0, 2, 1, 3])
+/// This is the standard multi-head attention transpose pattern.
+///
+/// Strategy:
+/// - Treat as batched 2D transpose: (B×D) batches of (H×N) matrices
+/// - Use shared memory tiling similar to batch_transpose_kernel
+/// - Each block handles one tile of the H×N matrix for one (b, d) pair
+#[cube(launch_unchecked)]
+fn attention_transpose_kernel<F: Float>(
+    input: &Tensor<Line<F>>,
+    output: &mut Tensor<Line<F>>,
+    batch: u32,
+    heads: u32,
+    seq_len: u32,
+    head_dim: u32,
+    #[comptime] tile_size: u32,
+) {
+    let block_idx = CUBE_POS;
+    let thread_x = UNIT_POS_X;
+    let thread_y = UNIT_POS_Y;
+
+    // Compute number of tiles for the H×N matrix
+    let num_tile_rows = heads.div_ceil(tile_size);
+    let num_tile_cols = seq_len.div_ceil(tile_size);
+    let tiles_per_matrix = num_tile_rows * num_tile_cols;
+
+    // Total matrices = B × D
+    let num_matrices = batch * head_dim;
+
+    // Decompose block index
+    let matrix_idx = block_idx / tiles_per_matrix;
+    let tile_in_matrix = block_idx % tiles_per_matrix;
+
+    if matrix_idx < num_matrices {
+        let b = matrix_idx / head_dim;
+        let d = matrix_idx % head_dim;
+
+        let tile_row_idx = tile_in_matrix / num_tile_cols;
+        let tile_col_idx = tile_in_matrix % num_tile_cols;
+
+        let tile_base_row = tile_row_idx * tile_size;
+        let tile_base_col = tile_col_idx * tile_size;
+
+        // Shared memory tile with padding
+        let padded_stride = tile_size + 1;
+        let mut tile = SharedMemory::<F>::new_lined(padded_stride * tile_size, 1u32);
+
+        // Phase 1: Load from input [B, H, N, D] into shared memory
+        let mut row_offset = thread_y;
+        while row_offset < tile_size {
+            let global_h = tile_base_row + row_offset;
+            let global_n = tile_base_col + thread_x;
+
+            if global_h < heads && global_n < seq_len {
+                let in_offset = b * input.stride(0)
+                              + global_h * input.stride(1)
+                              + global_n * input.stride(2)
+                              + d * input.stride(3);
+
+                let tile_idx = row_offset * padded_stride + thread_x;
+                tile[tile_idx] = input[in_offset];
+            }
+
+            row_offset += BLOCK_ROWS;
+        }
+
+        sync_cube();
+
+        // Phase 2: Write to output [B, N, H, D] with transpose
+        let mut col_offset = thread_y;
+        while col_offset < tile_size {
+            let global_n = tile_base_col + col_offset;
+            let global_h = tile_base_row + thread_x;
+
+            if global_n < seq_len && global_h < heads {
+                let tile_idx = thread_x * padded_stride + col_offset;
+
+                let out_offset = b * output.stride(0)
+                               + global_n * output.stride(1)
+                               + global_h * output.stride(2)
+                               + d * output.stride(3);
+
+                output[out_offset] = tile[tile_idx];
+            }
+
+            col_offset += BLOCK_ROWS;
+        }
+    }
+}
+
+// ===========================================================
 // SECTION III — Tile-based Transpose Kernels (Optimized Path)
 // ===========================================================
 
@@ -1350,6 +1494,82 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
     vectorization: u8,
 ) -> bool {
     match axes {
+        [0, 2, 3, 1] => {
+            // PHASE 3: Channel shuffle NCHW → NHWC
+            let batch = input.shape[0] as u32;
+            let channels = input.shape[1] as u32;
+            let height = input.shape[2] as u32;
+            let width = input.shape[3] as u32;
+
+            let cube_dim = CubeDim::default();
+            let total_elements = batch * channels * height * width;
+            let cube_count_x = total_elements.div_ceil(cube_dim.x);
+            let cube_count = CubeCount::Static(cube_count_x, 1, 1);
+
+            let input_arg = unsafe {
+                TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
+            };
+            let output_arg = unsafe {
+                TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
+            };
+
+            unsafe {
+                channel_shuffle_nchw_to_nhwc::launch_unchecked::<F, R>(
+                    client,
+                    cube_count,
+                    cube_dim,
+                    input_arg,
+                    output_arg,
+                    ScalarArg::new(batch),
+                    ScalarArg::new(channels),
+                    ScalarArg::new(height),
+                    ScalarArg::new(width),
+                );
+            }
+            true
+        }
+        [0, 2, 1, 3] => {
+            eprintln!("✓ CALLING attention_transpose_kernel for shape [{}, {}, {}, {}]",
+                     input.shape[0], input.shape[1], input.shape[2], input.shape[3]);
+            // PHASE 3: Attention transpose [B, H, N, D] → [B, N, H, D]
+            let batch = input.shape[0] as u32;
+            let heads = input.shape[1] as u32;
+            let seq_len = input.shape[2] as u32;
+            let head_dim = input.shape[3] as u32;
+
+            let tile_size = TILE_SIZE_MOV4; // 32×32 tiles
+            let num_tile_rows = heads.div_ceil(tile_size);
+            let num_tile_cols = seq_len.div_ceil(tile_size);
+            let tiles_per_matrix = num_tile_rows * num_tile_cols;
+            let num_matrices = batch * head_dim;
+            let total_blocks = num_matrices * tiles_per_matrix;
+
+            let cube_dim_2d = CubeDim::new(tile_size, BLOCK_ROWS, 1);
+            let cube_count_2d = CubeCount::Static(total_blocks, 1, 1);
+
+            let input_arg = unsafe {
+                TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
+            };
+            let output_arg = unsafe {
+                TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
+            };
+
+            unsafe {
+                attention_transpose_kernel::launch_unchecked::<F, R>(
+                    client,
+                    cube_count_2d,
+                    cube_dim_2d,
+                    input_arg,
+                    output_arg,
+                    ScalarArg::new(batch),
+                    ScalarArg::new(heads),
+                    ScalarArg::new(seq_len),
+                    ScalarArg::new(head_dim),
+                    tile_size,
+                );
+            }
+            true
+        }
         _ => false,
     }
 }

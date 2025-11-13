@@ -199,22 +199,20 @@ pub fn test_permute_4d_last_two_transpose<R: Runtime, C: Float + CubeElement>(
             for h in 0..height {
                 for w in 0..width {
                     // Output index: [b][c][w][h]
-                    let out_idx = b * channels * width * height
-                                + c * width * height
-                                + w * height
-                                + h;
+                    let out_idx =
+                        b * channels * width * height + c * width * height + w * height + h;
 
                     // Input index: [b][c][h][w]
-                    let in_idx = b * channels * height * width
-                               + c * height * width
-                               + h * width
-                               + w;
+                    let in_idx = b * channels * height * width + c * height * width + h * width + w;
 
                     assert_eq!(
                         actual[out_idx],
                         C::from(in_idx as f32).unwrap(),
                         "Mismatch at output[{},{},{},{}]",
-                        b, c, w, h
+                        b,
+                        c,
+                        w,
+                        h
                     );
                 }
             }
@@ -255,21 +253,19 @@ pub fn test_permute_4d_complex<R: Runtime, C: Float + CubeElement>(
         for w in 0..width {
             for c in 0..channels {
                 for h in 0..height {
-                    let out_idx = b * width * channels * height
-                                + w * channels * height
-                                + c * height
-                                + h;
+                    let out_idx =
+                        b * width * channels * height + w * channels * height + c * height + h;
 
-                    let in_idx = b * channels * height * width
-                               + c * height * width
-                               + h * width
-                               + w;
+                    let in_idx = b * channels * height * width + c * height * width + h * width + w;
 
                     assert_eq!(
                         actual[out_idx],
                         C::from(in_idx as f32).unwrap(),
                         "Mismatch at output[{},{},{},{}]",
-                        b, w, c, h
+                        b,
+                        w,
+                        c,
+                        h
                     );
                 }
             }
@@ -310,21 +306,19 @@ pub fn test_permute_channel_shuffle<R: Runtime, C: Float + CubeElement>(
         for h in 0..height {
             for w in 0..width {
                 for c in 0..channels {
-                    let out_idx = b * height * width * channels
-                                + h * width * channels
-                                + w * channels
-                                + c;
+                    let out_idx =
+                        b * height * width * channels + h * width * channels + w * channels + c;
 
-                    let in_idx = b * channels * height * width
-                               + c * height * width
-                               + h * width
-                               + w;
+                    let in_idx = b * channels * height * width + c * height * width + h * width + w;
 
                     assert_eq!(
                         actual[out_idx],
                         C::from(in_idx as f32).unwrap(),
                         "Mismatch at output[{},{},{},{}]",
-                        b, h, w, c
+                        b,
+                        h,
+                        w,
+                        c
                     );
                 }
             }
@@ -365,21 +359,20 @@ pub fn test_permute_attention_transpose<R: Runtime, C: Float + CubeElement>(
         for n in 0..seq_len {
             for h in 0..heads {
                 for d in 0..head_dim {
-                    let out_idx = b * seq_len * heads * head_dim
-                                + n * heads * head_dim
-                                + h * head_dim
-                                + d;
+                    let out_idx =
+                        b * seq_len * heads * head_dim + n * heads * head_dim + h * head_dim + d;
 
-                    let in_idx = b * heads * seq_len * head_dim
-                               + h * seq_len * head_dim
-                               + n * head_dim
-                               + d;
+                    let in_idx =
+                        b * heads * seq_len * head_dim + h * seq_len * head_dim + n * head_dim + d;
 
                     assert_eq!(
                         actual[out_idx],
                         C::from(in_idx as f32).unwrap(),
                         "Mismatch at output[{},{},{},{}]",
-                        b, n, h, d
+                        b,
+                        n,
+                        h,
+                        d
                     );
                 }
             }

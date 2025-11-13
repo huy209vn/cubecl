@@ -93,8 +93,6 @@ struct FoldedPermutation {
     folded_shape: Vec<usize>,
     /// Permutation in terms of folded dimensions
     folded_axes: Vec<usize>,
-    /// Whether folding simplified the problem
-    was_simplified: bool,
 }
 
 /// Fold contiguous dimensions to simplify permutation.
@@ -123,7 +121,6 @@ fn fold_contiguous_dimensions(
         return FoldedPermutation {
             folded_shape: input_shape.to_vec(),
             folded_axes: axes.to_vec(),
-            was_simplified: false,
         };
     }
 
@@ -219,7 +216,6 @@ fn fold_contiguous_dimensions(
         return FoldedPermutation {
             folded_shape: input_shape.to_vec(),
             folded_axes: axes.to_vec(),
-            was_simplified: false,
         };
     }
 
@@ -236,12 +232,9 @@ fn fold_contiguous_dimensions(
         }
     }
 
-    let was_simplified = folded_shape.len() < rank;
-
     FoldedPermutation {
         folded_shape,
         folded_axes,
-        was_simplified,
     }
 }
 
@@ -677,7 +670,7 @@ fn plane_shuffle_transpose_small<F: Float>(
         // Step 2: Calculate which INPUT value this thread needs for its OUTPUT position
         // Thread T writes to OUTPUT position T
         // In the transposed matrix (cols × rows), position T corresponds to:
-        let out_row = thread_id / rows;  // Note: dividing by rows (transposed dimensions!)
+        let out_row = thread_id / rows; // Note: dividing by rows (transposed dimensions!)
         let out_col = thread_id % rows;
 
         // That output position came from input position (out_col, out_row) in original matrix
@@ -726,8 +719,8 @@ fn channel_shuffle_nchw_to_nhwc_tiled<F: Float>(
     let tile_in_matrix = block_idx % tiles_per_matrix;
 
     // Find which tile within the C×W matrix
-    let tile_row_idx = tile_in_matrix / num_tile_cols;  // Channel tile
-    let tile_col_idx = tile_in_matrix % num_tile_cols;  // Width tile
+    let tile_row_idx = tile_in_matrix / num_tile_cols; // Channel tile
+    let tile_col_idx = tile_in_matrix % num_tile_cols; // Width tile
 
     // Decompose matrix_idx into (batch, height)
     // We'll pass this info via the input/output tensor indices
@@ -756,9 +749,9 @@ fn channel_shuffle_nchw_to_nhwc_tiled<F: Float>(
         if global_channel < channels && global_width < width {
             // Read from NCHW: [batch, channel, height, width]
             let input_idx = batch_idx * input.stride(0)
-                          + global_channel * input.stride(1)
-                          + height_idx * input.stride(2)
-                          + global_width * input.stride(3);
+                + global_channel * input.stride(1)
+                + height_idx * input.stride(2)
+                + global_width * input.stride(3);
 
             let tile_idx = row_offset * padded_stride + thread_x;
             tile[tile_idx] = input[input_idx];
@@ -781,9 +774,9 @@ fn channel_shuffle_nchw_to_nhwc_tiled<F: Float>(
 
             // Write to NHWC: [batch, height, width, channel]
             let output_idx = batch_idx * output.stride(0)
-                           + height_idx * output.stride(1)
-                           + global_width * output.stride(2)
-                           + global_channel * output.stride(3);
+                + height_idx * output.stride(1)
+                + global_width * output.stride(2)
+                + global_channel * output.stride(3);
 
             output[output_idx] = tile[tile_idx];
         }
@@ -809,9 +802,9 @@ fn attention_transpose_kernel<F: Float>(
     #[comptime] tile_size: u32,
 ) {
     // Use 3D grid coordinates to avoid expensive division/modulo
-    let tile_idx = CUBE_POS_X;  // Tile index within the H×N matrix
-    let d = CUBE_POS_Y;          // Head dimension index
-    let b = CUBE_POS_Z;          // Batch index
+    let tile_idx = CUBE_POS_X; // Tile index within the H×N matrix
+    let d = CUBE_POS_Y; // Head dimension index
+    let b = CUBE_POS_Z; // Batch index
 
     let thread_x = UNIT_POS_X;
     let thread_y = UNIT_POS_Y;
@@ -838,9 +831,9 @@ fn attention_transpose_kernel<F: Float>(
 
         if global_h < heads && global_n < seq_len {
             let in_offset = b * input.stride(0)
-                          + global_h * input.stride(1)
-                          + global_n * input.stride(2)
-                          + d * input.stride(3);
+                + global_h * input.stride(1)
+                + global_n * input.stride(2)
+                + d * input.stride(3);
 
             let tile_idx_mem = row_offset * padded_stride + thread_x;
             tile[tile_idx_mem] = input[in_offset];
@@ -861,9 +854,9 @@ fn attention_transpose_kernel<F: Float>(
             let tile_idx_mem = thread_x * padded_stride + col_offset;
 
             let out_offset = b * output.stride(0)
-                           + global_n * output.stride(1)
-                           + global_h * output.stride(2)
-                           + d * output.stride(3);
+                + global_n * output.stride(1)
+                + global_h * output.stride(2)
+                + d * output.stride(3);
 
             output[out_offset] = tile[tile_idx_mem];
         }
@@ -1191,7 +1184,9 @@ impl TileSize for Tile32 {
     const SIZE: u32 = 32;
 }
 
+#[allow(dead_code)]
 struct Tile64;
+#[allow(dead_code)]
 impl TileSize for Tile64 {
     const SIZE: u32 = 64;
 }
@@ -1224,11 +1219,6 @@ fn launch_scalar_tile_transpose_specialized<R: Runtime, F: Float, T: TileSize>(
     // Configure cube dimensions: tile_size × BLOCK_ROWS threads
     let cube_dim = CubeDim::new(tile_size, BLOCK_ROWS, 1);
 
-    // Use 1D grid - calculate total number of tiles across all batches
-    let tiles_per_batch = num_tile_rows * num_tile_cols;
-    let total_tiles = num_batches * tiles_per_batch;
-    let cube_count = CubeCount::Static(total_tiles, 1, 1);
-
     // Use scalar access for transpose - irregular memory patterns don't benefit from vectorization
     let vectorization = 1;
 
@@ -1243,7 +1233,10 @@ fn launch_scalar_tile_transpose_specialized<R: Runtime, F: Float, T: TileSize>(
     // Launch appropriate kernel based on rank (specialized for each tile size)
     unsafe {
         if num_batches == 1 && input.shape.len() == 2 {
-            // 2D transpose: use tile_transpose_2d_kernel
+            // 2D transpose: use tile_transpose_2d_kernel with 1D grid
+            let tiles_per_batch = num_tile_rows * num_tile_cols;
+            let cube_count = CubeCount::Static(tiles_per_batch, 1, 1);
+
             tile_transpose_2d_kernel::launch_unchecked::<F, R>(
                 client,
                 cube_count,
@@ -1255,7 +1248,11 @@ fn launch_scalar_tile_transpose_specialized<R: Runtime, F: Float, T: TileSize>(
                 tile_size,
             );
         } else {
-            // 3D batch transpose: use batch_transpose_kernel
+            // 3D batch transpose: use batch_transpose_kernel with 3D grid
+            // Grid layout: [num_batches, num_tile_rows, num_tile_cols]
+            // This matches the kernel's expectation of CUBE_POS_X/Y/Z
+            let cube_count = CubeCount::Static(num_batches, num_tile_rows, num_tile_cols);
+
             batch_transpose_kernel::launch_unchecked::<F, R>(
                 client,
                 cube_count,
@@ -1274,7 +1271,6 @@ fn launch_scalar_tile_transpose_specialized<R: Runtime, F: Float, T: TileSize>(
 ///
 /// These functions provide const-generic rank specialization, eliminating
 /// runtime rank checks and enabling better branch prediction and inlining.
-
 /// Rank-2 pattern matcher (compile-time specialized)
 #[inline]
 fn match_pattern_rank2<R: Runtime, F: Float>(
@@ -1292,7 +1288,12 @@ fn match_pattern_rank2<R: Runtime, F: Float>(
             TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
         };
         let output_arg = unsafe {
-            TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
+            TensorArg::from_raw_parts::<F>(
+                output.handle,
+                output.strides,
+                output.shape,
+                vectorization,
+            )
         };
 
         unsafe {
@@ -1320,10 +1321,20 @@ fn match_pattern_rank3<R: Runtime, F: Float>(
     match axes {
         [0, 2, 1] | [2, 0, 1] => {
             let input_arg = unsafe {
-                TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
+                TensorArg::from_raw_parts::<F>(
+                    input.handle,
+                    input.strides,
+                    input.shape,
+                    vectorization,
+                )
             };
             let output_arg = unsafe {
-                TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
+                TensorArg::from_raw_parts::<F>(
+                    output.handle,
+                    output.strides,
+                    output.shape,
+                    vectorization,
+                )
             };
 
             unsafe {
@@ -1378,10 +1389,20 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let cube_count = CubeCount::Static(total_tiles, 1, 1);
 
             let input_arg = unsafe {
-                TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
+                TensorArg::from_raw_parts::<F>(
+                    input.handle,
+                    input.strides,
+                    input.shape,
+                    vectorization,
+                )
             };
             let output_arg = unsafe {
-                TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
+                TensorArg::from_raw_parts::<F>(
+                    output.handle,
+                    output.strides,
+                    output.shape,
+                    vectorization,
+                )
             };
 
             unsafe {
@@ -1416,10 +1437,20 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             let cube_count_3d = CubeCount::Static(tiles_per_matrix, head_dim, batch);
 
             let input_arg = unsafe {
-                TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
+                TensorArg::from_raw_parts::<F>(
+                    input.handle,
+                    input.strides,
+                    input.shape,
+                    vectorization,
+                )
             };
             let output_arg = unsafe {
-                TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
+                TensorArg::from_raw_parts::<F>(
+                    output.handle,
+                    output.strides,
+                    output.shape,
+                    vectorization,
+                )
             };
 
             unsafe {
@@ -1474,10 +1505,22 @@ fn launch_permute_kernel<R: Runtime, F: Float>(
     // This provides better branch prediction and inlining
     let matched = match rank {
         2 => match_pattern_rank2::<R, F>(
-            client, input, output, axes, cube_count.clone(), cube_dim.clone(), vectorization,
+            client,
+            input,
+            output,
+            axes,
+            cube_count,
+            cube_dim,
+            vectorization,
         ),
         3 => match_pattern_rank3::<R, F>(
-            client, input, output, axes, cube_count.clone(), cube_dim.clone(), vectorization,
+            client,
+            input,
+            output,
+            axes,
+            cube_count,
+            cube_dim,
+            vectorization,
         ),
         4 => match_pattern_rank4::<R, F>(client, input, output, axes, vectorization),
         _ => false,
@@ -1490,7 +1533,12 @@ fn launch_permute_kernel<R: Runtime, F: Float>(
         };
 
         let output_arg = unsafe {
-            TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
+            TensorArg::from_raw_parts::<F>(
+                output.handle,
+                output.strides,
+                output.shape,
+                vectorization,
+            )
         };
 
         unsafe {
@@ -1551,7 +1599,12 @@ fn launch_batch_transpose_kernel_simple<R: Runtime, F: Float>(
             TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
         };
         let output_arg = unsafe {
-            TensorArg::from_raw_parts::<F>(output.handle, output.strides, output.shape, vectorization)
+            TensorArg::from_raw_parts::<F>(
+                output.handle,
+                output.strides,
+                output.shape,
+                vectorization,
+            )
         };
 
         // Launch with one plane per matrix
@@ -1575,7 +1628,14 @@ fn launch_batch_transpose_kernel_simple<R: Runtime, F: Float>(
         let use_vectorized = should_use_vectorized_transpose(num_batches, rows, cols);
 
         if use_vectorized {
-            launch_vectorized_tile_transpose::<R, F>(client, input, output, num_batches, rows, cols);
+            launch_vectorized_tile_transpose::<R, F>(
+                client,
+                input,
+                output,
+                num_batches,
+                rows,
+                cols,
+            );
         } else {
             launch_scalar_tile_transpose::<R, F>(client, input, output, num_batches, rows, cols);
         }
@@ -1830,21 +1890,17 @@ fn should_use_tile_transpose(num_dims: usize, axes: &[usize], rows: u32, cols: u
     // This catches [1,0], [0,2,1], [0,1,3,2], [0,1,2,4,3], etc.
     let is_last_two_transpose = if num_dims >= 2 {
         // Check if last two axes are swapped
-        let last_two_swapped = axes[num_dims - 2] == num_dims - 1
-                            && axes[num_dims - 1] == num_dims - 2;
+        let last_two_swapped =
+            axes[num_dims - 2] == num_dims - 1 && axes[num_dims - 1] == num_dims - 2;
 
         if !last_two_swapped {
             false
         } else {
             // Check that all other axes are identity-mapped (in order)
-            let mut all_identity = true;
-            for i in 0..num_dims - 2 {
-                if axes[i] != i {
-                    all_identity = false;
-                    break;
-                }
-            }
-            all_identity
+            axes.iter()
+                .take(num_dims - 2)
+                .enumerate()
+                .all(|(i, &ax)| ax == i)
         }
     } else {
         false
@@ -1922,21 +1978,18 @@ pub fn launch_ref<R: Runtime, F: Float>(
     // This now catches [1,0], [0,2,1], [0,1,3,2], [0,1,2,4,3], etc.
     let is_transpose_pattern = if rank >= 2 {
         // Check if last two axes are swapped
-        let last_two_swapped = dispatch_axes[rank - 2] == rank - 1
-                            && dispatch_axes[rank - 1] == rank - 2;
+        let last_two_swapped =
+            dispatch_axes[rank - 2] == rank - 1 && dispatch_axes[rank - 1] == rank - 2;
 
         if !last_two_swapped {
             false
         } else {
             // Check that all other axes are identity-mapped (in order)
-            let mut all_identity = true;
-            for i in 0..rank - 2 {
-                if dispatch_axes[i] != i {
-                    all_identity = false;
-                    break;
-                }
-            }
-            all_identity
+            dispatch_axes
+                .iter()
+                .take(rank - 2)
+                .enumerate()
+                .all(|(i, &ax)| ax == i)
         }
     } else {
         false

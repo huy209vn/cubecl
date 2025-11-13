@@ -693,45 +693,102 @@ fn plane_shuffle_transpose_small<F: Float>(
     }
 }
 
-/// Channel shuffle kernel for NCHW → NHWC layout conversion.
+/// Tiled channel shuffle kernel for NCHW → NHWC layout conversion.
 ///
 /// Optimized for [B, C, H, W] → [B, H, W, C] with axes [0, 2, 3, 1].
 /// This is one of the most common permutations in computer vision.
+///
+/// KEY INSIGHT: For each (batch, height) pair, NCHW → NHWC is a C×W transpose:
+/// - Input layout: channels are rows (slow), width is columns (fast)
+/// - Output layout: width are rows (slow), channels are columns (fast)
+///
+/// Uses shared memory tiling to achieve coalesced memory access and avoid
+/// expensive division/modulo operations.
 #[cube(launch_unchecked)]
-fn channel_shuffle_nchw_to_nhwc<F: Float>(
+fn channel_shuffle_nchw_to_nhwc_tiled<F: Float>(
     input: &Tensor<Line<F>>,
     output: &mut Tensor<Line<F>>,
-    batch: u32,
     channels: u32,
-    height: u32,
     width: u32,
+    #[comptime] tile_size: u32,
 ) {
-    let idx = ABSOLUTE_POS;
-    let total_elements = batch * channels * height * width;
+    // 1D grid where each block handles one tile of one (batch, height) C×W matrix
+    let block_idx = CUBE_POS;
 
-    if idx < total_elements {
-        // Decompose linear index into (b, c, h, w) for INPUT layout
-        let chw = channels * height * width;
-        let hw = height * width;
+    // Decompose block index
+    // Grid structure: for each (b, h), we have tiles_per_matrix tiles
+    let num_tile_rows = channels.div_ceil(tile_size);
+    let num_tile_cols = width.div_ceil(tile_size);
+    let tiles_per_matrix = num_tile_rows * num_tile_cols;
 
-        let b = idx / chw;
-        let c = (idx % chw) / hw;
-        let h = (idx % hw) / width;
-        let w = idx % width;
+    // Find which (batch, height) matrix this block belongs to
+    let matrix_idx = block_idx / tiles_per_matrix;
+    let tile_in_matrix = block_idx % tiles_per_matrix;
 
-        // Read from input NCHW: [b, c, h, w]
-        let in_offset = b * input.stride(0)
-                      + c * input.stride(1)
-                      + h * input.stride(2)
-                      + w * input.stride(3);
-        let value = input[in_offset];
+    // Find which tile within the C×W matrix
+    let tile_row_idx = tile_in_matrix / num_tile_cols;  // Channel tile
+    let tile_col_idx = tile_in_matrix % num_tile_cols;  // Width tile
 
-        // Write to output NHWC: [b, h, w, c]
-        let out_offset = b * output.stride(0)
-                       + h * output.stride(1)
-                       + w * output.stride(2)
-                       + c * output.stride(3);
-        output[out_offset] = value;
+    // Decompose matrix_idx into (batch, height)
+    // We'll pass this info via the input/output tensor indices
+    let batch_idx = matrix_idx / input.shape(2);
+    let height_idx = matrix_idx % input.shape(2);
+
+    // Tile base positions in C×W space
+    let tile_base_channel = tile_row_idx * tile_size;
+    let tile_base_width = tile_col_idx * tile_size;
+
+    // Thread position within block
+    let thread_x = UNIT_POS_X;
+    let thread_y = UNIT_POS_Y;
+
+    // Shared memory with padding to avoid bank conflicts
+    let padded_stride = tile_size + 1;
+    let mut tile = SharedMemory::<F>::new_lined(padded_stride * tile_size, 1u32);
+
+    // Phase 1: Cooperative load from NCHW layout
+    // Load tile of C×W matrix (channels × width)
+    let mut row_offset = thread_y;
+    while row_offset < tile_size {
+        let global_channel = tile_base_channel + row_offset;
+        let global_width = tile_base_width + thread_x;
+
+        if global_channel < channels && global_width < width {
+            // Read from NCHW: [batch, channel, height, width]
+            let input_idx = batch_idx * input.stride(0)
+                          + global_channel * input.stride(1)
+                          + height_idx * input.stride(2)
+                          + global_width * input.stride(3);
+
+            let tile_idx = row_offset * padded_stride + thread_x;
+            tile[tile_idx] = input[input_idx];
+        }
+
+        row_offset += BLOCK_ROWS;
+    }
+
+    sync_cube();
+
+    // Phase 2: Cooperative store to NHWC layout (transposed)
+    // Write transposed tile to NHWC layout
+    let mut col_offset = thread_y;
+    while col_offset < tile_size {
+        let global_width = tile_base_width + col_offset;
+        let global_channel = tile_base_channel + thread_x;
+
+        if global_width < width && global_channel < channels {
+            let tile_idx = thread_x * padded_stride + col_offset;
+
+            // Write to NHWC: [batch, height, width, channel]
+            let output_idx = batch_idx * output.stride(0)
+                           + height_idx * output.stride(1)
+                           + global_width * output.stride(2)
+                           + global_channel * output.stride(3);
+
+            output[output_idx] = tile[tile_idx];
+        }
+
+        col_offset += BLOCK_ROWS;
     }
 }
 
@@ -1299,16 +1356,26 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
 ) -> bool {
     match axes {
         [0, 2, 3, 1] => {
-            // PHASE 3: Channel shuffle NCHW → NHWC
+            // PHASE 3: Channel shuffle NCHW → NHWC (tiled transpose)
+            // For each (batch, height), we transpose a C×W matrix using tiling
             let batch = input.shape[0] as u32;
             let channels = input.shape[1] as u32;
             let height = input.shape[2] as u32;
             let width = input.shape[3] as u32;
 
-            let cube_dim = CubeDim::default();
-            let total_elements = batch * channels * height * width;
-            let cube_count_x = total_elements.div_ceil(cube_dim.x);
-            let cube_count = CubeCount::Static(cube_count_x, 1, 1);
+            // Use 32×32 tiles (same as other transpose kernels)
+            let tile_size = TILE_SIZE_MOV4; // 32×32
+            let num_tile_rows = channels.div_ceil(tile_size);
+            let num_tile_cols = width.div_ceil(tile_size);
+            let tiles_per_matrix = num_tile_rows * num_tile_cols;
+
+            // Total number of C×W matrices to transpose = batch × height
+            let num_matrices = batch * height;
+            let total_tiles = num_matrices * tiles_per_matrix;
+
+            // Cube dimensions: tile_size × BLOCK_ROWS threads per block
+            let cube_dim = CubeDim::new(tile_size, BLOCK_ROWS, 1);
+            let cube_count = CubeCount::Static(total_tiles, 1, 1);
 
             let input_arg = unsafe {
                 TensorArg::from_raw_parts::<F>(input.handle, input.strides, input.shape, vectorization)
@@ -1318,16 +1385,15 @@ fn match_pattern_rank4<R: Runtime, F: Float>(
             };
 
             unsafe {
-                channel_shuffle_nchw_to_nhwc::launch_unchecked::<F, R>(
+                channel_shuffle_nchw_to_nhwc_tiled::launch_unchecked::<F, R>(
                     client,
                     cube_count,
                     cube_dim,
                     input_arg,
                     output_arg,
-                    ScalarArg::new(batch),
                     ScalarArg::new(channels),
-                    ScalarArg::new(height),
                     ScalarArg::new(width),
+                    tile_size,
                 );
             }
             true

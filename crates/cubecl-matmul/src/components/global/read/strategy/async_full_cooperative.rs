@@ -1,14 +1,15 @@
 use crate::components::{
-    InvalidConfigError, MatmulIdent, MatrixLayout, MatrixPrecision, TilingScheme,
+    InvalidConfigError, MatmulElems, MatmulIdent, MatrixLayout, TilingScheme,
     global::{
         GlobalConfig,
         memory::{GlobalIterator, load_window_in_stage},
         multi_stage::LoadMaxRoundPlaneCount,
         read::{
             FullLoadingStrategy, LoadingJob, async_barrier::AsyncBarrier, validate_async_barrier,
+            validate_noswizzle,
         },
     },
-    stage::{StridedStage, StridedTilingLayout, TilingValidation},
+    stage::{StridedStageFamily, StridedStageMemory, StridedTilingLayout, TilingValidation},
 };
 use cubecl_core::prelude::{barrier::Barrier, *};
 use cubecl_core::{self as cubecl};
@@ -27,9 +28,11 @@ impl LoadingValidation for AsyncFullCooperativeLoading {
         client: &ComputeClient<R::Server>,
         config: &C,
         ident: MatmulIdent,
+        _dtypes: &MatmulElems,
     ) -> Result<(), InvalidConfigError> {
         StridedTilingLayout::check(config.global_memory_config(ident))?;
         validate_async_barrier::<R>(client)?;
+        validate_noswizzle(config.stage_memory_config(ident))?;
 
         Ok(())
     }
@@ -52,11 +55,11 @@ impl LoadMaxRoundPlaneCount for AsyncFullCooperativeLoading {
 impl FullLoadingStrategy for AsyncFullCooperativeLoading {
     type TilingLayout = StridedTilingLayout;
     type SyncStrategy = AsyncBarrier;
-    type Job<IP: MatrixPrecision> = AsyncFullCooperativeJob;
+    type Job<EG: Numeric, ES: Numeric> = AsyncFullCooperativeJob;
 
     const SHOULD_CLEAR: bool = true;
 
-    fn new_job<IP: MatrixPrecision, G: GlobalConfig>(
+    fn new_job<EG: Numeric, ES: Numeric, G: GlobalConfig>(
         #[comptime] ident: MatmulIdent,
         #[comptime] _line_size: u32,
         #[comptime] config: G,
@@ -81,14 +84,16 @@ pub struct AsyncFullCooperativeJob {
 }
 
 #[cube]
-impl<IP: MatrixPrecision> LoadingJob<IP, StridedTilingLayout, AsyncBarrier>
+impl<EG: Numeric, ES: Numeric> LoadingJob<EG, ES, StridedTilingLayout, AsyncBarrier>
     for AsyncFullCooperativeJob
 {
+    type Stage = StridedStageFamily;
+
     fn execute_task<G: GlobalConfig>(
         this: &mut Self,
         #[comptime] task_id: u32,
-        global_iter: &GlobalIterator<Line<IP::Global>>,
-        stage: &mut StridedStage<IP::Stage, StridedTilingLayout>,
+        global_iter: &GlobalIterator<Line<EG>>,
+        stage: &mut StridedStageMemory<ES, StridedTilingLayout>,
         barrier: &mut Barrier,
         #[comptime] config: G,
     ) {
@@ -98,7 +103,7 @@ impl<IP: MatrixPrecision> LoadingJob<IP, StridedTilingLayout, AsyncBarrier>
             comptime!(config.global_memory_config(this.ident)),
         );
 
-        let mut destination: SliceMut<Line<IP::Stage>> = StridedTilingLayout::nth_slice::<IP::Stage>(
+        let mut destination: SliceMut<Line<ES>> = StridedTilingLayout::nth_slice::<ES>(
             stage,
             task_id,
             comptime!(config.stage_memory_config(this.ident)),

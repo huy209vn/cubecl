@@ -1,6 +1,3 @@
-use crate::components::global::multi_stage::double_buffer_execution::{
-    execute_current_and_read_next, execute_last_and_write_results, read_first,
-};
 use crate::components::global::{GlobalConfig, GlobalWriter};
 use crate::components::global::{Specializer, read::SyncStrategy};
 use crate::components::{
@@ -9,11 +6,17 @@ use crate::components::{
         PartialLoadingStrategy, PartialStageGlobalReader, StageBuffer, ZeroGlobalReader,
     },
 };
-use crate::components::{AccS, LhsG, LhsS, MatmulIdent, RhsG, RhsS, global};
+use crate::components::{AccS, LhsG, LhsS, MatmulIdent, MatrixPrecision, RhsG, RhsS, global};
 use crate::components::{MatmulPrecision, stage};
 use crate::components::{
+    global::multi_stage::double_buffer_execution::{
+        execute_current_and_read_next, execute_last_and_write_results, read_first,
+    },
+    stage::StridedStageFamily,
+};
+use crate::components::{
     global::multi_stage::double_buffering::DoubleBufferingGlobalConfig,
-    stage::{FilledStage, StridedStage},
+    stage::{FilledStage, StridedStageMemory},
 };
 use cubecl_core as cubecl;
 use cubecl_core::prelude::*;
@@ -46,19 +49,29 @@ impl<MP: MatmulPrecision, SMM, LL, RL, GW> global::GlobalMatmul<MP>
 where
     SMM: stage::StageMatmul<
             MP,
-            LhsStage = StridedStage<LhsS<MP>, LL::TilingLayout>,
-            RhsStage = StridedStage<RhsS<MP>, RL::TilingLayout>,
+            LhsStage = StridedStageMemory<LhsS<MP>, LL::TilingLayout>,
+            RhsStage = StridedStageMemory<RhsS<MP>, RL::TilingLayout>,
             AccStage = FilledStage<AccS<MP>>,
             OutStage = GW::Stage,
         >,
-    LL: PartialLoadingStrategy,
-    RL: PartialLoadingStrategy<SyncStrategy = LL::SyncStrategy>,
+    LL: PartialLoadingStrategy<Stage = StridedStageFamily>,
+    RL: PartialLoadingStrategy<Stage = StridedStageFamily, SyncStrategy = LL::SyncStrategy>,
     GW: GlobalWriter<MP::Acc>,
 {
     type Config = DoubleBufferingGlobalConfig<SMM::Config>;
 
-    type LhsGlobalReader = PartialStageGlobalReader<MP::Lhs, Self::Config, LL>;
-    type RhsGlobalReader = PartialStageGlobalReader<MP::Rhs, Self::Config, RL>;
+    type LhsGlobalReader = PartialStageGlobalReader<
+        <MP::Lhs as MatrixPrecision>::Global,
+        <MP::Lhs as MatrixPrecision>::Stage,
+        Self::Config,
+        LL,
+    >;
+    type RhsGlobalReader = PartialStageGlobalReader<
+        <MP::Rhs as MatrixPrecision>::Global,
+        <MP::Rhs as MatrixPrecision>::Stage,
+        Self::Config,
+        RL,
+    >;
     type AccGlobalReader = ZeroGlobalReader<MP::Acc>;
 
     type GlobalWriter = GW;
@@ -210,12 +223,12 @@ where
         #[comptime] config: Self::Config,
     ) -> Self::LhsGlobalReader {
         let k_step = k_step::<Self::Config>(config);
-        PartialStageGlobalReader::<MP::Lhs, Self::Config, LL>::new(
-            lhs,
-            k_step,
-            MatmulIdent::Lhs,
-            config,
-        )
+        PartialStageGlobalReader::<
+            <MP::Lhs as MatrixPrecision>::Global,
+            <MP::Lhs as MatrixPrecision>::Stage,
+            Self::Config,
+            LL,
+        >::new(lhs, k_step, MatmulIdent::Lhs, config)
     }
 
     fn init_rhs_global_reader(
@@ -223,12 +236,12 @@ where
         #[comptime] config: Self::Config,
     ) -> Self::RhsGlobalReader {
         let k_step = k_step::<Self::Config>(config);
-        PartialStageGlobalReader::<MP::Rhs, Self::Config, RL>::new(
-            rhs,
-            k_step,
-            MatmulIdent::Rhs,
-            config,
-        )
+        PartialStageGlobalReader::<
+            <MP::Rhs as MatrixPrecision>::Global,
+            <MP::Rhs as MatrixPrecision>::Stage,
+            Self::Config,
+            RL,
+        >::new(rhs, k_step, MatmulIdent::Rhs, config)
     }
 
     fn init_acc_global_reader(

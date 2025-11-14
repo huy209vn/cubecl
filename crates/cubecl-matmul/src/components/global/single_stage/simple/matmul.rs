@@ -1,11 +1,11 @@
 use crate::components::{
-    AccG, AccS, LhsG, LhsS, MatmulIdent, MatmulPrecision, RhsG, RhsS,
+    AccG, AccS, LhsG, LhsS, MatmulIdent, MatmulPrecision, MatrixPrecision, RhsG, RhsS,
     global::{
         GlobalMatmul, GlobalWriter,
         read::{FullLoadingStrategy, FullStageGlobalReader, SyncStrategy, ZeroGlobalReader},
         single_stage::simple::SimpleConfig,
     },
-    stage::{FilledStage, StageMatmul, StridedStage},
+    stage::{FilledStage, StageMatmul, StridedStageMemory},
 };
 use cubecl_core as cubecl;
 use cubecl_core::prelude::*;
@@ -36,8 +36,8 @@ impl<MP: MatmulPrecision, SMM, LL, RL, GW> GlobalMatmul<MP> for SimpleMatmul<MP,
 where
     SMM: StageMatmul<
             MP,
-            LhsStage = StridedStage<LhsS<MP>, LL::TilingLayout>,
-            RhsStage = StridedStage<RhsS<MP>, RL::TilingLayout>,
+            LhsStage = StridedStageMemory<LhsS<MP>, LL::TilingLayout>,
+            RhsStage = StridedStageMemory<RhsS<MP>, RL::TilingLayout>,
             AccStage = FilledStage<AccS<MP>>,
             OutStage = GW::Stage,
         >,
@@ -46,8 +46,18 @@ where
     GW: GlobalWriter<MP::Acc>,
 {
     type Config = SimpleConfig<SMM::Config>;
-    type LhsGlobalReader = FullStageGlobalReader<MP::Lhs, Self::Config, LL>;
-    type RhsGlobalReader = FullStageGlobalReader<MP::Rhs, Self::Config, RL>;
+    type LhsGlobalReader = FullStageGlobalReader<
+        <MP::Lhs as MatrixPrecision>::Global,
+        <MP::Lhs as MatrixPrecision>::Stage,
+        Self::Config,
+        LL,
+    >;
+    type RhsGlobalReader = FullStageGlobalReader<
+        <MP::Rhs as MatrixPrecision>::Global,
+        <MP::Rhs as MatrixPrecision>::Stage,
+        Self::Config,
+        RL,
+    >;
     type AccGlobalReader = ZeroGlobalReader<MP::Acc>;
     type GlobalWriter = GW;
     type Accumulators = SMM::Accumulators;

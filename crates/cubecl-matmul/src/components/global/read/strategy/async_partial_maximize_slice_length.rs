@@ -1,14 +1,15 @@
 use crate::components::{
-    InvalidConfigError, MatmulIdent, MatrixLayout, MatrixPrecision, TilingScheme,
+    InvalidConfigError, MatmulElems, MatmulIdent, MatrixLayout, TilingScheme,
     global::{
         GlobalConfig,
         memory::{GlobalIterator, load_window_in_stage},
         multi_stage::LoadMaxRoundPlaneCount,
         read::{
-            LoadingJob, PartialLoadingStrategy, async_barrier::AsyncBarrier, validate_async_barrier,
+            LoadingJob, PartialLoadingStrategy, async_barrier::AsyncBarrier,
+            validate_async_barrier, validate_noswizzle,
         },
     },
-    stage::{StridedStage, StridedTilingLayout, TilingValidation},
+    stage::{StridedStageFamily, StridedStageMemory, StridedTilingLayout, TilingValidation},
 };
 use cubecl_core::prelude::{barrier::Barrier, *};
 use cubecl_core::{self as cubecl};
@@ -25,9 +26,11 @@ impl LoadingValidation for AsyncPartialMaximizeSliceLengthLoading {
         client: &ComputeClient<R::Server>,
         config: &C,
         ident: MatmulIdent,
+        _dtypes: &MatmulElems,
     ) -> Result<(), InvalidConfigError> {
         StridedTilingLayout::check(config.global_memory_config(ident))?;
         validate_async_barrier::<R>(client)?;
+        validate_noswizzle(config.stage_memory_config(ident))?;
 
         Ok(())
     }
@@ -50,9 +53,11 @@ impl LoadMaxRoundPlaneCount for AsyncPartialMaximizeSliceLengthLoading {
 impl PartialLoadingStrategy for AsyncPartialMaximizeSliceLengthLoading {
     type TilingLayout = StridedTilingLayout;
     type SyncStrategy = AsyncBarrier;
-    type Job<IP: MatrixPrecision> = AsyncPartialMaximizeSliceLengthJob;
+    type Stage = StridedStageFamily;
 
-    fn new_job<IP: MatrixPrecision, G: GlobalConfig>(
+    type Job<EG: Numeric, ES: Numeric> = AsyncPartialMaximizeSliceLengthJob;
+
+    fn new_job<EG: Numeric, ES: Numeric, G: GlobalConfig>(
         #[comptime] stage_index: u32,
         #[comptime] ident: MatmulIdent,
         #[comptime] line_size: u32,
@@ -128,14 +133,16 @@ pub struct AsyncPartialMaximizeSliceLengthJob {
 }
 
 #[cube]
-impl<IP: MatrixPrecision> LoadingJob<IP, StridedTilingLayout, AsyncBarrier>
+impl<EG: Numeric, ES: Numeric> LoadingJob<EG, ES, StridedTilingLayout, AsyncBarrier>
     for AsyncPartialMaximizeSliceLengthJob
 {
+    type Stage = StridedStageFamily;
+
     fn execute_task<G: GlobalConfig>(
         this: &mut Self,
         #[comptime] task_id: u32,
-        global_iter: &GlobalIterator<Line<IP::Global>>,
-        stage: &mut StridedStage<IP::Stage, StridedTilingLayout>,
+        global_iter: &GlobalIterator<Line<EG>>,
+        stage: &mut StridedStageMemory<ES, StridedTilingLayout>,
         barrier: &mut Barrier,
         #[comptime] config: G,
     ) {
@@ -149,7 +156,7 @@ impl<IP: MatrixPrecision> LoadingJob<IP, StridedTilingLayout, AsyncBarrier>
             nth_slice,
             comptime!(config.global_memory_config(this.ident)),
         );
-        let mut destination: SliceMut<Line<IP::Stage>> = StridedTilingLayout::nth_slice::<IP::Stage>(
+        let mut destination: SliceMut<Line<ES>> = StridedTilingLayout::nth_slice::<ES>(
             &mut stage,
             nth_slice_in_stage,
             comptime!(config.stage_memory_config(this.ident)),

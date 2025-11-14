@@ -1,19 +1,23 @@
 use std::marker::PhantomData;
 
-use crate::components::global::read::{PartialLoadingStrategy, sync::Synchronous};
-use crate::components::global::{RoleRule, read::tiled::TiledLayout};
-use crate::components::stage::TilingOrderEnum;
+use crate::components::{FormattedConfigError, InvalidConfigError, MatmulIdent, TilingScheme};
 use crate::components::{
-    FormattedConfigError, InvalidConfigError, MatmulIdent, MatrixPrecision, TilingScheme,
+    MatmulElems,
+    global::{RoleRule, read::tiled::TiledLayout},
 };
 use crate::components::{global::multi_stage::LoadMaxRoundPlaneCount, stage::TilingValidation};
+use crate::components::{global::read::validate_swizzle_atom_size, stage::TilingOrderEnum};
+use crate::components::{
+    global::read::{PartialLoadingStrategy, sync::Synchronous},
+    stage::StridedStageFamily,
+};
 use crate::components::{
     global::{GlobalConfig, memory::GlobalIterator},
-    stage::{ContiguousTilingLayout, StridedStage, TilingOrder},
+    stage::{ContiguousTilingLayout, StridedStageMemory, TilingOrder},
 };
 use cubecl_core as cubecl;
 use cubecl_core::prelude::*;
-use cubecl_std::tensor::layout::Coords2d;
+use cubecl_std::{tensor::layout::Coords2d, type_size};
 
 use super::{LoadingJob, LoadingValidation};
 
@@ -46,6 +50,7 @@ impl<T: TilingOrder> LoadingValidation for SyncPartialTilewiseLoading<T> {
         _client: &ComputeClient<R::Server>,
         config: &C,
         ident: MatmulIdent,
+        dtypes: &MatmulElems,
     ) -> Result<(), InvalidConfigError> {
         let line_size = config.global_line_size(ident);
         let num_planes = config.num_loading_planes(ident);
@@ -89,6 +94,7 @@ impl<T: TilingOrder> LoadingValidation for SyncPartialTilewiseLoading<T> {
             MatmulIdent::Out => unreachable!(),
         }
 
+        validate_swizzle_atom_size(config.stage_memory_config(ident), ident, dtypes)?;
         ContiguousTilingLayout::<T>::check(config.global_memory_config(ident))?;
 
         Ok(())
@@ -99,9 +105,11 @@ impl<T: TilingOrder> LoadingValidation for SyncPartialTilewiseLoading<T> {
 impl<TO: TilingOrder> PartialLoadingStrategy for SyncPartialTilewiseLoading<TO> {
     type TilingLayout = ContiguousTilingLayout<TO>;
     type SyncStrategy = Synchronous;
-    type Job<IP: MatrixPrecision> = SyncPartialTilewiseJob;
+    type Stage = StridedStageFamily;
 
-    fn new_job<IP: MatrixPrecision, G: GlobalConfig>(
+    type Job<EG: Numeric, ES: Numeric> = SyncPartialTilewiseJob;
+
+    fn new_job<EG: Numeric, ES: Numeric, G: GlobalConfig>(
         #[comptime] stage_index: u32,
         #[comptime] ident: MatmulIdent,
         #[comptime] line_size: u32,
@@ -160,14 +168,16 @@ pub struct SyncPartialTilewiseJob {
 }
 
 #[cube]
-impl<IP: MatrixPrecision, TO: TilingOrder> LoadingJob<IP, ContiguousTilingLayout<TO>, Synchronous>
-    for SyncPartialTilewiseJob
+impl<EG: Numeric, ES: Numeric, TO: TilingOrder>
+    LoadingJob<EG, ES, ContiguousTilingLayout<TO>, Synchronous> for SyncPartialTilewiseJob
 {
+    type Stage = StridedStageFamily;
+
     fn execute_task<G: GlobalConfig>(
         this: &mut Self,
         #[comptime] task_id: u32,
-        global_iter: &GlobalIterator<Line<IP::Global>>,
-        stage: &mut StridedStage<IP::Stage, ContiguousTilingLayout<TO>>,
+        global_iter: &GlobalIterator<Line<EG>>,
+        stage: &mut StridedStageMemory<ES, ContiguousTilingLayout<TO>>,
         _barrier: &mut (),
         #[comptime] config: G,
     ) {
@@ -195,7 +205,7 @@ impl<IP: MatrixPrecision, TO: TilingOrder> LoadingJob<IP, ContiguousTilingLayout
 
         let num_lines_to_skip_global = nth_tile_global * this.num_lines_per_tile;
 
-        SyncPartialTilewiseJob::load_and_store_line::<IP, TO, G>(
+        SyncPartialTilewiseJob::load_and_store_line::<EG, ES, TO, G>(
             this,
             tile,
             line_index_within_tile,
@@ -214,13 +224,13 @@ impl<IP: MatrixPrecision, TO: TilingOrder> LoadingJob<IP, ContiguousTilingLayout
 #[cube]
 impl SyncPartialTilewiseJob {
     #[allow(clippy::too_many_arguments)]
-    fn load_and_store_line<IP: MatrixPrecision, TO: TilingOrder, G: GlobalConfig>(
+    fn load_and_store_line<EG: Numeric, ES: Numeric, TO: TilingOrder, G: GlobalConfig>(
         this: &Self,
         tile: Coords2d,
         line_index_within_tile: u32,
         num_lines_to_skip_global: u32,
-        global_iter: &GlobalIterator<Line<IP::Global>>,
-        stage: &mut StridedStage<IP::Stage, ContiguousTilingLayout<TO>>,
+        global_iter: &GlobalIterator<Line<EG>>,
+        stage: &mut StridedStageMemory<ES, ContiguousTilingLayout<TO>>,
         #[comptime] config: G,
     ) {
         let layout = TiledLayout::new(comptime!(config.global_memory_config(this.ident)));
@@ -229,6 +239,8 @@ impl SyncPartialTilewiseJob {
         let line_read = view.read_checked((tile, line_index_within_tile * this.line_size));
 
         let offset = line_index_within_tile + num_lines_to_skip_global;
+        let type_size = type_size::<ES>(this.line_size);
+        let offset = stage.swizzle.apply(offset, type_size);
 
         stage.as_slice_mut(this.line_size)[offset] = Line::cast_from(line_read);
     }

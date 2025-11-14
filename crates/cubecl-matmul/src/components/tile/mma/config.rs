@@ -1,10 +1,13 @@
-use cubecl_core::Runtime;
-use cubecl_core::client::ComputeClient;
+use cubecl_core::{Runtime, ir::MatrixIdent};
+use cubecl_core::{client::ComputeClient, ir::StorageType};
 use cubecl_runtime::MmaConfig;
 
-use crate::components::error::{MatmulAvailabilityError, MatmulSetupError};
-use crate::components::tile::TileConfig;
 use crate::components::{MatmulElems, MatrixLayout, StageIdent, TileSize};
+use crate::components::{SwizzleConfig, tile::TileConfig};
+use crate::components::{
+    error::{MatmulAvailabilityError, MatmulSetupError},
+    stage::SwizzleMode,
+};
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 /// Configuration for Accelerated Matmul
@@ -18,6 +21,16 @@ pub struct MmaMatmulConfig {
     out_global_line_size: u32,
     lhs_stage_line_size: u32,
     rhs_stage_line_size: u32,
+    lhs_load_method: LoadMethod,
+    rhs_load_method: LoadMethod,
+    acc_load_method: LoadMethod,
+    swizzle: SwizzleConfig,
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub enum LoadMethod {
+    Manual,
+    LoadMatrix,
 }
 
 impl TileConfig for MmaMatmulConfig {
@@ -31,6 +44,15 @@ impl TileConfig for MmaMatmulConfig {
             StageIdent::Rhs => self.rhs_layout,
             StageIdent::Acc => MatrixLayout::RowMajor,
             StageIdent::Out => MatrixLayout::RowMajor,
+        }
+    }
+
+    fn swizzle_mode(&self, ident: StageIdent) -> SwizzleMode {
+        match ident {
+            StageIdent::Lhs => self.swizzle.lhs,
+            StageIdent::Rhs => self.swizzle.rhs,
+            StageIdent::Acc => self.swizzle.acc,
+            StageIdent::Out => self.swizzle.out,
         }
     }
 
@@ -76,6 +98,7 @@ impl MmaMatmulConfig {
         lhs_stage_line_size: u32,
         rhs_stage_line_size: u32,
         dtypes: &MatmulElems,
+        swizzle: SwizzleConfig,
     ) -> Result<Self, MatmulSetupError> {
         Self {
             tile_size,
@@ -87,6 +110,10 @@ impl MmaMatmulConfig {
             out_global_line_size,
             lhs_stage_line_size,
             rhs_stage_line_size,
+            lhs_load_method: load_method::<R>(client, dtypes.lhs_stage),
+            rhs_load_method: load_method::<R>(client, dtypes.rhs_stage),
+            acc_load_method: load_method::<R>(client, dtypes.acc_stage),
+            swizzle,
         }
         .check_availability::<R>(client, dtypes)
     }
@@ -120,5 +147,21 @@ impl MmaMatmulConfig {
         }
 
         Ok(self)
+    }
+
+    pub fn load_method(&self, ident: MatrixIdent) -> LoadMethod {
+        match ident {
+            MatrixIdent::A => self.lhs_load_method,
+            MatrixIdent::B => self.rhs_load_method,
+            MatrixIdent::Accumulator => self.acc_load_method,
+        }
+    }
+}
+
+fn load_method<R: Runtime>(client: &ComputeClient<R::Server>, dtype: StorageType) -> LoadMethod {
+    if client.properties().features.ldmatrix.contains(&dtype) {
+        LoadMethod::LoadMatrix
+    } else {
+        LoadMethod::Manual
     }
 }

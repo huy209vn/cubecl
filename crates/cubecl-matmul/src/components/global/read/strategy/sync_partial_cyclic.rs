@@ -1,13 +1,23 @@
 use std::marker::PhantomData;
 
-use crate::components::global::read::{PartialLoadingStrategy, tiled::TiledLayout};
-use crate::components::global::{GlobalConfig, RoleRule};
-use crate::components::global::{multi_stage::LoadMaxRoundPlaneCount, read::sync::Synchronous};
-use crate::components::stage::{ContiguousTilingLayout, StridedStage, TilingOrder};
-use crate::components::{InvalidConfigError, MatmulIdent, MatrixPrecision, TilingScheme};
+use crate::components::global::{
+    multi_stage::LoadMaxRoundPlaneCount,
+    read::{sync::Synchronous, validate_swizzle_atom_size},
+};
+use crate::components::stage::{ContiguousTilingLayout, StridedStageMemory, TilingOrder};
+use crate::components::{InvalidConfigError, MatmulIdent, TilingScheme};
+use crate::components::{
+    MatmulElems,
+    global::{GlobalConfig, RoleRule},
+};
 use crate::components::{global::memory::GlobalIterator, stage::TilingValidation};
+use crate::components::{
+    global::read::{PartialLoadingStrategy, tiled::TiledLayout},
+    stage::StridedStageFamily,
+};
 use cubecl_core as cubecl;
 use cubecl_core::prelude::*;
+use cubecl_std::type_size;
 
 use super::{LoadingJob, LoadingValidation, ReaderMode};
 
@@ -24,6 +34,7 @@ impl<TO: TilingOrder> LoadingValidation for SyncPartialCyclicLoading<TO> {
         _client: &ComputeClient<R::Server>,
         config: &C,
         ident: MatmulIdent,
+        dtypes: &MatmulElems,
     ) -> Result<(), InvalidConfigError> {
         if let ReaderMode::Strict = config.reader_mode() {
             let line_size = config.global_line_size(ident);
@@ -48,6 +59,7 @@ impl<TO: TilingOrder> LoadingValidation for SyncPartialCyclicLoading<TO> {
             }
         }
 
+        validate_swizzle_atom_size(config.stage_memory_config(ident), ident, dtypes)?;
         ContiguousTilingLayout::<TO>::check(config.global_memory_config(ident))?;
 
         Ok(())
@@ -72,9 +84,11 @@ impl<TO: TilingOrder> LoadMaxRoundPlaneCount for SyncPartialCyclicLoading<TO> {
 impl<TO: TilingOrder> PartialLoadingStrategy for SyncPartialCyclicLoading<TO> {
     type TilingLayout = ContiguousTilingLayout<TO>;
     type SyncStrategy = Synchronous;
-    type Job<IP: MatrixPrecision> = SyncPartialCyclicJob;
+    type Stage = StridedStageFamily;
 
-    fn new_job<IP: MatrixPrecision, G: GlobalConfig>(
+    type Job<EG: Numeric, ES: Numeric> = SyncPartialCyclicJob;
+
+    fn new_job<EG: Numeric, ES: Numeric, G: GlobalConfig>(
         #[comptime] stage_index: u32,
         #[comptime] ident: MatmulIdent,
         #[comptime] line_size: u32,
@@ -137,14 +151,16 @@ pub struct SyncPartialCyclicJob {
 }
 
 #[cube]
-impl<IP: MatrixPrecision, TO: TilingOrder> LoadingJob<IP, ContiguousTilingLayout<TO>, Synchronous>
-    for SyncPartialCyclicJob
+impl<EG: Numeric, ES: Numeric, TO: TilingOrder>
+    LoadingJob<EG, ES, ContiguousTilingLayout<TO>, Synchronous> for SyncPartialCyclicJob
 {
+    type Stage = StridedStageFamily;
+
     fn execute_task<G: GlobalConfig>(
         this: &mut Self,
         #[comptime] task_id: u32,
-        global_iter: &GlobalIterator<Line<IP::Global>>,
-        stage: &mut StridedStage<IP::Stage, ContiguousTilingLayout<TO>>,
+        global_iter: &GlobalIterator<Line<EG>>,
+        stage: &mut StridedStageMemory<ES, ContiguousTilingLayout<TO>>,
         _barrier: &mut (),
         #[comptime] config: G,
     ) {
@@ -153,10 +169,16 @@ impl<IP: MatrixPrecision, TO: TilingOrder> LoadingJob<IP, ContiguousTilingLayout
 
         #[allow(clippy::collapsible_else_if)]
         if comptime!(this.reader_mode == ReaderMode::Strict || this.balanced_workload) {
-            load_and_store_line::<IP, TO, G>(this, unit_position, global_iter, &mut stage, config);
+            load_and_store_line::<EG, ES, TO, G>(
+                this,
+                unit_position,
+                global_iter,
+                &mut stage,
+                config,
+            );
         } else {
             if unit_position < this.num_stage_elements {
-                load_and_store_line::<IP, TO, G>(
+                load_and_store_line::<EG, ES, TO, G>(
                     this,
                     unit_position,
                     global_iter,
@@ -173,11 +195,11 @@ impl<IP: MatrixPrecision, TO: TilingOrder> LoadingJob<IP, ContiguousTilingLayout
 }
 
 #[cube]
-pub(crate) fn load_and_store_line<IP: MatrixPrecision, TO: TilingOrder, G: GlobalConfig>(
+pub(crate) fn load_and_store_line<EG: Numeric, ES: Numeric, TO: TilingOrder, G: GlobalConfig>(
     job: &SyncPartialCyclicJob,
     unit_position: u32,
-    global_iter: &GlobalIterator<Line<IP::Global>>,
-    stage: &mut StridedStage<IP::Stage, ContiguousTilingLayout<TO>>,
+    global_iter: &GlobalIterator<Line<EG>>,
+    stage: &mut StridedStageMemory<ES, ContiguousTilingLayout<TO>>,
     #[comptime] config: G,
 ) {
     let layout = TiledLayout::new(comptime!(config.global_memory_config(job.ident)));
@@ -217,10 +239,10 @@ pub(crate) fn load_and_store_line<IP: MatrixPrecision, TO: TilingOrder, G: Globa
     let line_read = view.read_checked((tile, pos_within_tile));
 
     let tile_start = tile_index * job.num_lines_per_tile;
-    let tile_end = tile_start + job.num_lines_per_tile;
-    let mut tile_slice = stage
-        .as_slice_mut(line_size)
-        .slice_mut(tile_start, tile_end);
+    let mut tile_slice = stage.as_slice_mut(line_size);
+    let offset = tile_start + pos_within_tile / line_size;
+    let type_size = type_size::<ES>(line_size);
+    let offset = stage.swizzle.apply(offset, type_size);
 
-    tile_slice[pos_within_tile / line_size] = Line::cast_from(line_read);
+    tile_slice[offset] = Line::cast_from(line_read);
 }

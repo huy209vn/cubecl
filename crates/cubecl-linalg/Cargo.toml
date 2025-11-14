@@ -60,16 +60,16 @@ linalg_tests_all = [
 
 [dependencies]
 bytemuck = { workspace = true }
-cubecl-common = { path = "../cubecl-common", version = "0.9.0", default-features = false }
-cubecl-core = { path = "../cubecl-core", version = "0.9.0", default-features = false }
-cubecl-runtime = { path = "../cubecl-runtime", version = "0.9.0", default-features = false }
-cubecl-std = { path = "../cubecl-std", version = "0.9.0", default-features = false }
-cubecl-reduce = { path = "../cubecl-reduce", version = "0.9.0", default-features = false }
-cubecl-matmul = { path = "../cubecl-matmul", version = "0.9.0", default-features = false }
-cubecl-random = { path = "../cubecl-random", version = "0.9.0", default-features = false }
-cubecl-cpu = { path = "../cubecl-cpu", version = "0.9.0", default-features = false, optional = true }
-cubecl-cuda = { path = "../cubecl-cuda", version = "0.9.0", default-features = false, optional = true }
-cubecl-wgpu = { path = "../cubecl-wgpu", version = "0.9.0", default-features = false, optional = true }
+cubecl-common = { path = "../cubecl-common", version = "0.9.0-pre.1", default-features = false }
+cubecl-core = { path = "../cubecl-core", version = "0.9.0-pre.1", default-features = false }
+cubecl-runtime = { path = "../cubecl-runtime", version = "0.9.0-pre.1", default-features = false }
+cubecl-std = { path = "../cubecl-std", version = "0.9.0-pre.1", default-features = false }
+cubecl-reduce = { path = "../cubecl-reduce", version = "0.9.0-pre.1", default-features = false }
+cubecl-matmul = { path = "../cubecl-matmul", version = "0.9.0-pre.1", default-features = false }
+cubecl-random = { path = "../cubecl-random", version = "0.9.0-pre.1", default-features = false }
+cubecl-cpu = { path = "../cubecl-cpu", version = "0.9.0-pre.1", default-features = false, optional = true }
+cubecl-cuda = { path = "../cubecl-cuda", version = "0.9.0-pre.1", default-features = false, optional = true }
+cubecl-wgpu = { path = "../cubecl-wgpu", version = "0.9.0-pre.1", default-features = false, optional = true }
 half = { workspace = true, features = ["bytemuck"] }
 thiserror = { workspace = true }
 once_cell = "1.20"
@@ -79,7 +79,7 @@ pretty_assertions = { workspace = true, optional = true }
 
 [dev-dependencies]
 approx = "0.5"
-cubecl-cpu = { path = "../cubecl-cpu", version = "0.9.0", default-features = false }
+cubecl-cpu = { path = "../cubecl-cpu", version = "0.9.0-pre.1", default-features = false }
 rand = { workspace = true }
 
 [[bench]]

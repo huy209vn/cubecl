@@ -146,7 +146,7 @@ pub fn triu<R: Runtime, P: LinalgPrecision>(
     _client: &ComputeClient<R::Server>,
     _a: TensorHandleRef<R>,
     _k: isize,
-) -> LinalgResult<TensorHandle<R, P::EW>>
+) -> LinalgResult<TensorHandle<R>>
 where
     P::EW: Float,
 {
@@ -181,7 +181,7 @@ pub fn tril<R: Runtime, P: LinalgPrecision>(
     _client: &ComputeClient<R::Server>,
     _a: TensorHandleRef<R>,
     _k: isize,
-) -> LinalgResult<TensorHandle<R, P::EW>>
+) -> LinalgResult<TensorHandle<R>>
 where
     P::EW: Float,
 {
@@ -302,7 +302,7 @@ pub fn trsm<R: Runtime, P: LinalgPrecision>(
     alpha: P::EA,
     a: TensorHandleRef<R>,
     b: TensorHandleRef<R>,
-) -> LinalgResult<TensorHandle<R, P::EW>>
+) -> LinalgResult<TensorHandle<R>>
 where
     P::EW: Float + cubecl_matmul::components::MatmulPrecision,
     P::EA: Float,
@@ -321,7 +321,7 @@ pub fn trsm_with_config<R: Runtime, P: LinalgPrecision>(
     a: TensorHandleRef<R>,
     b: TensorHandleRef<R>,
     config: Option<TrsmConfig>,
-) -> LinalgResult<TensorHandle<R, P::EW>>
+) -> LinalgResult<TensorHandle<R>>
 where
     P::EW: Float + cubecl_matmul::components::MatmulPrecision,
     P::EA: Float,
@@ -369,7 +369,7 @@ where
     let config = config.unwrap_or_else(|| TrsmConfig::auto_tune(k));
 
     // Create output tensor (copy of B, will be modified in-place conceptually)
-    let output = TensorHandle::<R, P::EW>::empty(client, b_shape.to_vec());
+    let output = TensorHandle::<R>::empty(client, b_shape.to_vec(), P::EW::as_type_native_unchecked());
 
     // Copy B to output using copy_kernel
     let total_elements: usize = b_shape.iter().product();
@@ -549,20 +549,21 @@ where
     // Use the correct output type for matmul (AccG = Acc::Global)
     type AccG<MP> = cubecl_matmul::components::AccG<MP>;
     let temp_shape = vec![k2, n];
-    let temp = TensorHandle::<R, AccG<P::EW>>::empty(client, temp_shape.clone());
+    let temp = TensorHandle::<R>::empty(client, temp_shape.clone(), AccG::<P::EW>::as_type_native_unchecked());
 
     // GEMM: temp = L21 * B1
-    // Fix TensorHandle::new argument order: (handle, shape, strides)
-    let l21_handle = TensorHandle::new(l21.handle.clone(), l21.shape.to_vec(), l21.strides.to_vec());
-    let b1_handle = TensorHandle::new(b1.handle.clone(), b1.shape.to_vec(), b1.strides.to_vec());
+    // Fix TensorHandle::new argument order: (handle, shape, strides, storage)
+    let l21_handle = TensorHandle::new(l21.handle.clone(), l21.shape.to_vec(), l21.strides.to_vec(), P::EW::as_type_native_unchecked());
+    let b1_handle = TensorHandle::new(b1.handle.clone(), b1.shape.to_vec(), b1.strides.to_vec(), P::EW::as_type_native_unchecked());
 
     // Use P::EW as the MatmulPrecision type
-    let _ = matmul::launch::<R, P::EW>(
+    let _ = matmul::launch::<R>(
         &MatmulStrategy::Auto,
         client,
         MatmulInputHandle::Normal(l21_handle),
         MatmulInputHandle::Normal(b1_handle),
         temp.clone(),
+        cubecl_matmul::components::MatmulElems::new::<P::EW>(),
     );
 
     // Fused: B2 = alpha * B2 - temp
@@ -645,7 +646,7 @@ pub fn trmm<R: Runtime, P: LinalgPrecision>(
     _alpha: P::EA,
     _a: TensorHandleRef<R>,
     _b: TensorHandleRef<R>,
-) -> LinalgResult<TensorHandle<R, P::EW>>
+) -> LinalgResult<TensorHandle<R>>
 where
     P::EW: Float,
     P::EA: Float,
@@ -705,7 +706,7 @@ pub fn syrk<R: Runtime, P: LinalgPrecision>(
     c: TensorHandleRef<R>,
 ) -> LinalgResult<()>
 where
-    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision + CubeElement,
     P::EA: Float,
 {
     // Validate shapes

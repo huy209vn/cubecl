@@ -43,7 +43,7 @@ use crate::kernels::{sqrt_kernel, SumSquared};
 pub fn vector_norm_l2<R: Runtime, P: LinalgPrecision>(
     client: &ComputeClient<R::Server>,
     x: TensorHandleRef<R>,
-) -> LinalgResult<TensorHandle<R, P::EA>>
+) -> LinalgResult<TensorHandle<R>>
 where
     P::EW: Float,
     P::EA: Float,
@@ -101,51 +101,66 @@ where
         // Reduce along axis 1: [M, N] → [M, 1] using SumSquared
         let mut stage1_shape = reshaped_shape.clone();
         stage1_shape[1] = 1;
-        let stage1_output = TensorHandle::<R, P::EA>::empty(client, stage1_shape.clone());
+        let stage1_output = TensorHandle::<R>::empty(client, stage1_shape.clone(), P::EA::as_type_native_unchecked());
 
-        reduce::<R, (P::EA, P::EA), P::EA, SumSquared>(
+        reduce::<R, SumSquared>(
             client,
             x_reshaped,
             stage1_output.as_ref(),
             1, // Reduce along axis 1 (inner dimension)
             None,
             (),
+            cubecl_reduce::ReduceDtypes {
+                input: P::EG::as_type_native_unchecked(),
+                output: P::EA::as_type_native_unchecked(),
+                accumulation: P::EA::as_type_native_unchecked(),
+            },
         ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
 
         // Stage 2: Reduce [M, 1] → [1, 1] using Sum
         let mut final_shape = stage1_shape.clone();
         final_shape[0] = 1;
-        let sum_output = TensorHandle::<R, P::EA>::empty(client, final_shape);
+        let sum_output = TensorHandle::<R>::empty(client, final_shape, P::EA::as_type_native_unchecked());
 
-        reduce::<R, (P::EA, P::EA), P::EA, Sum>(
+        reduce::<R, Sum>(
             client,
             stage1_output.as_ref(),
             sum_output.as_ref(),
             0, // Reduce along axis 0
             None,
             (),
+            cubecl_reduce::ReduceDtypes {
+                input: P::EA::as_type_native_unchecked(),
+                output: P::EA::as_type_native_unchecked(),
+                accumulation: P::EA::as_type_native_unchecked(),
+            },
         ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
 
         intermediate_output = sum_output;
     } else {
         // Single-stage reduction for small tensors
         let sum_shape = vec![1];
-        let sum_output = TensorHandle::<R, P::EA>::empty(client, sum_shape.clone());
+        let sum_output = TensorHandle::<R>::empty(client, sum_shape.clone(), P::EA::as_type_native_unchecked());
 
-        reduce::<R, (P::EA, P::EA), P::EA, SumSquared>(
+        reduce::<R, SumSquared>(
             client,
             x_flat,
             sum_output.as_ref(),
             0,
             None,
             (),
+            cubecl_reduce::ReduceDtypes {
+                input: P::EG::as_type_native_unchecked(),
+                output: P::EA::as_type_native_unchecked(),
+                accumulation: P::EA::as_type_native_unchecked(),
+            },
         ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
 
         intermediate_output = sum_output;
     }
 
     // Final step: Take square root
-    let norm_output = TensorHandle::<R, P::EA>::empty(client, vec![1]);
+    let norm_output = TensorHandle::<R>::empty(client, vec![1], P::EA::as_type_native_unchecked());
 
     sqrt_kernel::launch::<P::EA, R>(
         client,
@@ -177,7 +192,7 @@ where
 pub fn vector_norm_inf<R: Runtime, P: LinalgPrecision>(
     client: &ComputeClient<R::Server>,
     x: TensorHandleRef<R>,
-) -> LinalgResult<TensorHandle<R, P::EA>>
+) -> LinalgResult<TensorHandle<R>>
 where
     P::EW: Float,
     P::EA: Float,
@@ -227,44 +242,59 @@ where
         // Reduce along axis 1: [M, N] → [M, 1] using MaxAbs
         let mut stage1_shape = reshaped_shape.clone();
         stage1_shape[1] = 1;
-        let stage1_output = TensorHandle::<R, P::EA>::empty(client, stage1_shape.clone());
+        let stage1_output = TensorHandle::<R>::empty(client, stage1_shape.clone(), P::EA::as_type_native_unchecked());
 
-        reduce::<R, (P::EA, P::EA), P::EA, MaxAbs>(
+        reduce::<R, MaxAbs>(
             client,
             x_reshaped,
             stage1_output.as_ref(),
             1,
             None,
             (),
+            cubecl_reduce::ReduceDtypes {
+                input: P::EG::as_type_native_unchecked(),
+                output: P::EA::as_type_native_unchecked(),
+                accumulation: P::EA::as_type_native_unchecked(),
+            },
         ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
 
         // Stage 2: Reduce [M, 1] → [1, 1] using Max
         let mut final_shape = stage1_shape.clone();
         final_shape[0] = 1;
-        let max_output = TensorHandle::<R, P::EA>::empty(client, final_shape);
+        let max_output = TensorHandle::<R>::empty(client, final_shape, P::EA::as_type_native_unchecked());
 
-        reduce::<R, (P::EA, P::EA), P::EA, Max>(
+        reduce::<R, Max>(
             client,
             stage1_output.as_ref(),
             max_output.as_ref(),
             0,
             None,
             (),
+            cubecl_reduce::ReduceDtypes {
+                input: P::EA::as_type_native_unchecked(),
+                output: P::EA::as_type_native_unchecked(),
+                accumulation: P::EA::as_type_native_unchecked(),
+            },
         ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
 
         intermediate_output = max_output;
     } else {
         // Single-stage reduction for small tensors
         let max_shape = vec![1];
-        let max_output = TensorHandle::<R, P::EA>::empty(client, max_shape);
+        let max_output = TensorHandle::<R>::empty(client, max_shape, P::EA::as_type_native_unchecked());
 
-        reduce::<R, (P::EA, P::EA), P::EA, MaxAbs>(
+        reduce::<R, MaxAbs>(
             client,
             x_flat,
             max_output.as_ref(),
             0,
             None,
             (),
+            cubecl_reduce::ReduceDtypes {
+                input: P::EG::as_type_native_unchecked(),
+                output: P::EA::as_type_native_unchecked(),
+                accumulation: P::EA::as_type_native_unchecked(),
+            },
         ).map_err(|e| LinalgError::ReduceFailure(format!("{:?}", e)))?;
 
         intermediate_output = max_output;
@@ -291,7 +321,7 @@ where
 pub fn frobenius_norm<R: Runtime, P: LinalgPrecision>(
     client: &ComputeClient<R::Server>,
     a: TensorHandleRef<R>,
-) -> LinalgResult<TensorHandle<R, P::EA>>
+) -> LinalgResult<TensorHandle<R>>
 where
     P::EW: Float,
     P::EA: Float,
@@ -331,7 +361,7 @@ pub fn spectral_norm_est<R: Runtime, P: LinalgPrecision>(
     _client: &ComputeClient<R::Server>,
     _a: TensorHandleRef<R>,
     _k_iters: usize,
-) -> LinalgResult<TensorHandle<R, P::EA>>
+) -> LinalgResult<TensorHandle<R>>
 where
     P::EW: Float,
     P::EA: Float,

@@ -153,7 +153,7 @@ pub fn syrk_fused_kernel<F: Float>(
             // a_tile_i[ty, :] has A[i, k_start:k_start+TILE_K]
             // a_tile_j[tx, :] has A[j, k_start:k_start+TILE_K]
 
-            let k_end = TILE_K.min(k - k_start);
+            let k_end = cubecl_core::frontend::Min::min(TILE_K, k - k_start);
             for kk in 0..k_end {
                 let a_ik = a_tile_i[ty * TILE_K + kk];
                 let a_jk = a_tile_j[tx * TILE_K + kk];

@@ -91,10 +91,10 @@ pub fn cholesky<R: Runtime, P: LinalgPrecision>(
     a: TensorHandleRef<R>,
     uplo: Triangle,
     check_spd: bool,
-) -> LinalgResult<(TensorHandle<R, P::EW>, SolveInfo)>
+) -> LinalgResult<(TensorHandle<R>, SolveInfo)>
 where
     P::EG: Into<P::EW>,
-    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision + CubeElement,
     P::EA: Float,
 {
     // Validate input shape
@@ -119,7 +119,7 @@ where
     let nb = config.panel_size;
 
     // Allocate output buffer for L (could optimize to in-place later)
-    let mut l = TensorHandle::<R, P::EW>::empty(client, shape.to_vec());
+    let mut l = TensorHandle::<R>::empty(client, shape.to_vec(), P::EW::as_type_native_unchecked());
 
     // Copy A to L (working buffer)
     // Launch copy kernel: L = A
@@ -172,7 +172,7 @@ where
         };
 
         // Allocate info flag tensor (single u32)
-        let mut potrf_info = TensorHandle::<R, u32>::empty(client, vec![1]);
+        let mut potrf_info = TensorHandle::<R>::empty(client, vec![1], u32::as_type_native_unchecked());
 
         // Launch POTRF kernel on panel
         let panel_threads = usize::min(128, panel_size * 2); // Use enough threads for parallelism
@@ -202,8 +202,8 @@ where
         }
 
         // === Step 1.5: Extract diagonal min/max for conditioning ===
-        let mut diag_min_tensor = TensorHandle::<R, P::EW>::empty(client, vec![1]);
-        let mut diag_max_tensor = TensorHandle::<R, P::EW>::empty(client, vec![1]);
+        let mut diag_min_tensor = TensorHandle::<R>::empty(client, vec![1], P::EW::as_type_native_unchecked());
+        let mut diag_max_tensor = TensorHandle::<R>::empty(client, vec![1], P::EW::as_type_native_unchecked());
 
         let diag_cube_count = CubeCount::Static(1, 1, 1);
         let diag_cube_dim = CubeDim::new(1, 1, 1);
@@ -354,10 +354,10 @@ pub fn solve_spd<R: Runtime, P: LinalgPrecision>(
     client: &ComputeClient<R::Server>,
     a: TensorHandleRef<R>,
     b: TensorHandleRef<R>,
-) -> LinalgResult<(TensorHandle<R, P::EW>, SolveInfo)>
+) -> LinalgResult<(TensorHandle<R>, SolveInfo)>
 where
     P::EG: Into<P::EW>,
-    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision + CubeElement,
     P::EA: Float,
 {
     // Step 1: Cholesky factorization
@@ -390,7 +390,7 @@ where
     // )?;
 
     // Placeholder for now
-    let x = TensorHandle::<R, P::EW>::empty(client, b.shape.to_vec());
+    let x = TensorHandle::<R>::empty(client, b.shape.to_vec(), P::EW::as_type_native_unchecked());
 
     // TODO: Compute residual and update info
     // let residual = residual(a, x, b)?;
@@ -427,10 +427,10 @@ where
 pub fn inverse_spd<R: Runtime, P: LinalgPrecision>(
     client: &ComputeClient<R::Server>,
     a: TensorHandleRef<R>,
-) -> LinalgResult<(TensorHandle<R, P::EW>, SolveInfo)>
+) -> LinalgResult<(TensorHandle<R>, SolveInfo)>
 where
     P::EG: Into<P::EW>,
-    P::EW: Float + cubecl_matmul::components::MatmulPrecision,
+    P::EW: Float + cubecl_matmul::components::MatmulPrecision + CubeElement,
     P::EA: Float,
 {
     // Step 1: Cholesky factorization
@@ -445,7 +445,7 @@ where
     // TODO: Use SYRK (symmetric rank-k) or GEMM
 
     // Placeholder
-    let a_inv = TensorHandle::<R, P::EW>::empty(client, a.shape.to_vec());
+    let a_inv = TensorHandle::<R>::empty(client, a.shape.to_vec(), P::EW::as_type_native_unchecked());
 
     Ok((a_inv, info))
 }

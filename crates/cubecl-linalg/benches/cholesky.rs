@@ -197,7 +197,6 @@ fn bench_conditioning() {
 fn main() {
     println!("╔═══════════════════════════════════════════════════════╗");
     println!("║    CubeCL Linear Algebra - Cholesky Benchmark         ║");
-    println!("║              Phase 1: SOTA Performance                ║");
     println!("╚═══════════════════════════════════════════════════════╝");
 
     // Main scalability benchmark

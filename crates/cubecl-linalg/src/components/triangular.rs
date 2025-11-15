@@ -193,15 +193,15 @@ where
     })
 }
 
-/// Small triangular solve kernel for Left-Lower-NoTrans-NonUnit
+/// GPU kernel for Left-Lower-NoTrans-NonUnit TRSM
 ///
 /// Solves L * X = alpha * B where L is lower triangular.
-/// This is the base case for the recursive TRSM algorithm.
+/// Fully GPU-resident - handles matrices of any size.
 ///
 /// Parallelism strategy: Parallel over RHS columns (nrhs dimension),
 /// sequential within each column due to data dependencies.
 #[cube(launch)]
-fn small_trsm_left_lower_kernel<F: Float>(
+fn trsm_left_lower_kernel<F: Float>(
     a: &Tensor<F>,       // Lower triangular matrix [k, k]
     b: &mut Tensor<F>,   // RHS matrix [k, nrhs]
     alpha: F,
@@ -244,7 +244,7 @@ fn small_trsm_left_lower_kernel<F: Float>(
 /// Solves L^T * X = alpha * B where L is lower triangular.
 /// Uses backward substitution since L^T is upper triangular.
 #[cube(launch)]
-fn small_trsm_left_lower_trans_kernel<F: Float>(
+fn trsm_left_lower_trans_kernel<F: Float>(
     a: &Tensor<F>,       // Lower triangular matrix [k, k]
     b: &mut Tensor<F>,   // RHS matrix [k, nrhs]
     alpha: F,
@@ -287,7 +287,7 @@ fn small_trsm_left_lower_trans_kernel<F: Float>(
 /// Solves U * X = alpha * B where U is upper triangular.
 /// Uses backward substitution.
 #[cube(launch)]
-fn small_trsm_left_upper_kernel<F: Float>(
+fn trsm_left_upper_kernel<F: Float>(
     a: &Tensor<F>,       // Upper triangular matrix [k, k]
     b: &mut Tensor<F>,   // RHS matrix [k, nrhs]
     alpha: F,
@@ -329,7 +329,7 @@ fn small_trsm_left_upper_kernel<F: Float>(
 /// Solves U^T * X = alpha * B where U is upper triangular.
 /// Uses forward substitution since U^T is lower triangular.
 #[cube(launch)]
-fn small_trsm_left_upper_trans_kernel<F: Float>(
+fn trsm_left_upper_trans_kernel<F: Float>(
     a: &Tensor<F>,       // Upper triangular matrix [k, k]
     b: &mut Tensor<F>,   // RHS matrix [k, nrhs]
     alpha: F,
@@ -370,7 +370,7 @@ fn small_trsm_left_upper_trans_kernel<F: Float>(
 /// Solves X * L = alpha * B where L is lower triangular.
 /// Each thread handles one row of X.
 #[cube(launch)]
-fn small_trsm_right_lower_kernel<F: Float>(
+fn trsm_right_lower_kernel<F: Float>(
     a: &Tensor<F>,       // Lower triangular matrix [n, n]
     b: &mut Tensor<F>,   // RHS matrix [m, n]
     alpha: F,
@@ -412,7 +412,7 @@ fn small_trsm_right_lower_kernel<F: Float>(
 /// Since L^T is upper triangular, use backward column solve.
 /// **This is the variant needed for Cholesky!**
 #[cube(launch)]
-fn small_trsm_right_lower_trans_kernel<F: Float>(
+fn trsm_right_lower_trans_kernel<F: Float>(
     a: &Tensor<F>,       // Lower triangular matrix [n, n]
     b: &mut Tensor<F>,   // RHS matrix [m, n]
     alpha: F,
@@ -456,7 +456,7 @@ fn small_trsm_right_lower_trans_kernel<F: Float>(
 /// Solves X * U = alpha * B where U is upper triangular.
 /// Backward column solve.
 #[cube(launch)]
-fn small_trsm_right_upper_kernel<F: Float>(
+fn trsm_right_upper_kernel<F: Float>(
     a: &Tensor<F>,       // Upper triangular matrix [n, n]
     b: &mut Tensor<F>,   // RHS matrix [m, n]
     alpha: F,
@@ -499,7 +499,7 @@ fn small_trsm_right_upper_kernel<F: Float>(
 /// Solves X * U^T = alpha * B where U is upper triangular.
 /// Since U^T is lower triangular, use forward column solve.
 #[cube(launch)]
-fn small_trsm_right_upper_trans_kernel<F: Float>(
+fn trsm_right_upper_trans_kernel<F: Float>(
     a: &Tensor<F>,       // Upper triangular matrix [n, n]
     b: &mut Tensor<F>,   // RHS matrix [m, n]
     alpha: F,
@@ -696,7 +696,7 @@ where
     Ok(output)
 }
 
-/// Recursive TRSM implementation
+/// Iterative blocked TRSM implementation (GPU-resident)
 fn trsm_recursive<R: Runtime, P: LinalgPrecision>(
     client: &ComputeClient<R::Server>,
     side: Side,
@@ -713,559 +713,114 @@ where
     P::EA: Float,
 {
     let k = a.shape[0];
-    let (m, n) = (b.shape[0], b.shape[1]);
+    let (_m, _n) = (b.shape[0], b.shape[1]);
 
-    // Base case: use direct kernel
-    if k <= config.base_threshold {
-        // Unit diagonal not yet supported
-        if diag == Diagonal::Unit {
-            return Err(LinalgError::UnsupportedLayout {
-                layout: "Unit diagonal TRSM not yet implemented".to_string(),
-            });
-        }
-
-        // For all current precision types, EA and EW are the same (f32/f32, f64/f64, etc.)
-        // Use a transmute-style conversion via bit representation
-        // Safety: EA and EW are always the same size and representation for valid precision types
-        let alpha_bits = unsafe { mem::transmute_copy::<P::EA, P::EW>(&alpha) };
-
-        // Dispatch to the appropriate kernel based on side/uplo/trans
-        match (side, uplo, trans) {
-            (Side::Left, Triangle::Lower, Transpose::NoTrans) => {
-                small_trsm_left_lower_kernel::launch::<P::EW, R>(
-                    client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(n as u32, 1, 1),
-                    a.as_tensor_arg(1),
-                    b.as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-            (Side::Left, Triangle::Lower, Transpose::Trans) => {
-                small_trsm_left_lower_trans_kernel::launch::<P::EW, R>(
-                    client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(n as u32, 1, 1),
-                    a.as_tensor_arg(1),
-                    b.as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-            (Side::Left, Triangle::Upper, Transpose::NoTrans) => {
-                small_trsm_left_upper_kernel::launch::<P::EW, R>(
-                    client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(n as u32, 1, 1),
-                    a.as_tensor_arg(1),
-                    b.as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-            (Side::Left, Triangle::Upper, Transpose::Trans) => {
-                small_trsm_left_upper_trans_kernel::launch::<P::EW, R>(
-                    client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(n as u32, 1, 1),
-                    a.as_tensor_arg(1),
-                    b.as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-            (Side::Right, Triangle::Lower, Transpose::NoTrans) => {
-                small_trsm_right_lower_kernel::launch::<P::EW, R>(
-                    client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(m as u32, 1, 1),
-                    a.as_tensor_arg(1),
-                    b.as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-            (Side::Right, Triangle::Lower, Transpose::Trans) => {
-                small_trsm_right_lower_trans_kernel::launch::<P::EW, R>(
-                    client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(m as u32, 1, 1),
-                    a.as_tensor_arg(1),
-                    b.as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-            (Side::Right, Triangle::Upper, Transpose::NoTrans) => {
-                small_trsm_right_upper_kernel::launch::<P::EW, R>(
-                    client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(m as u32, 1, 1),
-                    a.as_tensor_arg(1),
-                    b.as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-            (Side::Right, Triangle::Upper, Transpose::Trans) => {
-                small_trsm_right_upper_trans_kernel::launch::<P::EW, R>(
-                    client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(m as u32, 1, 1),
-                    a.as_tensor_arg(1),
-                    b.as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-            _ => {
-                return Err(LinalgError::UnsupportedLayout {
-                    layout: format!("Unsupported TRSM variant: {:?}-{:?}-{:?}", side, uplo, trans),
-                });
-            }
-        }
-
-        return Ok(());
-    }
-
-    // Recursive case: dispatch based on side
-    // Unit diagonal not yet supported in recursive case
+    // Unit diagonal not yet supported
     if diag == Diagonal::Unit {
         return Err(LinalgError::UnsupportedLayout {
-            layout: "Unit diagonal TRSM not yet implemented in recursive case".to_string(),
+            layout: "Unit diagonal TRSM not yet implemented".to_string(),
         });
     }
-
-    match side {
-        Side::Left => {
-            trsm_recursive_left::<R, P>(client, uplo, trans, diag, alpha, a, b, config)
-        }
-        Side::Right => {
-            trsm_recursive_right::<R, P>(client, uplo, trans, diag, alpha, a, b, config)
-        }
-    }
-}
-
-/// Recursive TRSM for Left side: op(A) * X = alpha * B
-fn trsm_recursive_left<R: Runtime, P: LinalgPrecision>(
-    client: &ComputeClient<R::Server>,
-    uplo: Triangle,
-    trans: Transpose,
-    diag: Diagonal,
-    alpha: P::EA,
-    a: TensorHandleRef<R>,
-    b: TensorHandleRef<R>,
-    config: TrsmConfig,
-) -> LinalgResult<()>
-where
-    P::EW: Float + cubecl_matmul::components::MatmulPrecision + CubeElement,
-    P::EA: Float,
-{
-    let k = a.shape[0];
-    let n = b.shape[1];
-
-    // Partition: divide k by 2 (recursive halving strategy)
-    let k1 = k / 2;
-    let k2 = k - k1;
-
-    // L = [L11   0 ]   B = [B1]   X = [X1]
-    //     [L21  L22]       [B2]       [X2]
-    //
-    // Solve: L * X = alpha * B
-    // 1. L11 * X1 = alpha * B1  (recursive)
-    // 2. B2 := alpha * B2 - L21 * X1  (GEMM)
-    // 3. L22 * X2 = B2  (recursive, alpha=1 since B2 already scaled)
-
-    // Create views for submatrices
-    // Create shape arrays with longer lifetime
-    let l11_shape = vec![k1, k1];
-    let l21_shape = vec![k2, k1];
-    let l22_shape = vec![k2, k2];
-    let b1_shape = vec![k1, n];
-    let b2_shape = vec![k2, n];
-
-    // L11: a[0:k1, 0:k1]
-    let l11 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            a.handle,
-            &a.strides[..],
-            &l11_shape,
-            a.elem_size,
-        )
-    };
-
-    // L21: a[k1:k, 0:k1]
-    let l21_offset = (k1 * a.strides[0]) as u64;
-    let l21_handle = a.handle.clone().offset_start(l21_offset);
-    let l21 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            &l21_handle,
-            &a.strides[..],
-            &l21_shape,
-            a.elem_size,
-        )
-    };
-
-    // L22: a[k1:k, k1:k]
-    let l22_offset = (k1 * a.strides[0] + k1 * a.strides[1]) as u64;
-    let l22_handle = a.handle.clone().offset_start(l22_offset);
-    let l22 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            &l22_handle,
-            &a.strides[..],
-            &l22_shape,
-            a.elem_size,
-        )
-    };
-
-    // B1: b[0:k1, :]
-    let b1 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            b.handle,
-            &b.strides[..],
-            &b1_shape,
-            b.elem_size,
-        )
-    };
-
-    // B2: b[k1:k, :]
-    let b2_offset = (k1 * b.strides[0]) as u64;
-    let b2_handle = b.handle.clone().offset_start(b2_offset);
-    let b2 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            &b2_handle,
-            &b.strides[..],
-            &b2_shape,
-            b.elem_size,
-        )
-    };
-
-    // Step 1: Solve op(A11) * X1 = alpha * B1
-    trsm_recursive_left::<R, P>(client, uplo, trans, diag, alpha, l11, b1, config)?;
-
-    // Step 2: Update B2 := alpha * B2 - L21 * X1
-    // This is: B2 = alpha * B2 - L21 * B1
-    //
-    // We compute:
-    // 1. temp = L21 * B1  (GEMM)
-    // 2. B2 = alpha * B2 - temp  (fused element-wise)
-
-    // Temp result: [k2, n]
-    // Use the correct output type for matmul (AccG = Acc::Global)
-    type AccG<MP> = cubecl_matmul::components::AccG<MP>;
-    let temp_shape = vec![k2, n];
-    let temp = TensorHandle::<R>::empty(client, temp_shape.clone(), AccG::<P::EW>::as_type_native_unchecked());
-
-    // GEMM: temp = L21 * B1
-    // Fix TensorHandle::new argument order: (handle, shape, strides, storage)
-    let l21_handle = TensorHandle::new(l21.handle.clone(), l21.shape.to_vec(), l21.strides.to_vec(), P::EW::as_type_native_unchecked());
-    let b1_handle = TensorHandle::new(b1.handle.clone(), b1.shape.to_vec(), b1.strides.to_vec(), P::EW::as_type_native_unchecked());
-
-    // Use P::EW as the MatmulPrecision type
-    let _ = matmul::launch::<R>(
-        &MatmulStrategy::Auto,
-        client,
-        MatmulInputHandle::Normal(l21_handle),
-        MatmulInputHandle::Normal(b1_handle),
-        temp.clone(),
-        cubecl_matmul::components::MatmulElems::new::<P::EW>(),
-    );
-
-    // Fused: B2 = alpha * B2 - temp
-    let total_elements = k2 * n;
-    let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
-    let cube_dim = CubeDim::new(256, 1, 1);
 
     // For all current precision types, EA and EW are the same (f32/f32, f64/f64, etc.)
     // Use a transmute-style conversion via bit representation
     // Safety: EA and EW are always the same size and representation for valid precision types
     let alpha_bits = unsafe { mem::transmute_copy::<P::EA, P::EW>(&alpha) };
 
-    fused_scale_sub_kernel::launch::<P::EW, R>(
-        client,
-        cube_count,
-        cube_dim,
-        b2.as_tensor_arg(1),
-        temp.as_ref().as_tensor_arg(1),
-        ScalarArg::new(alpha_bits),
-    );
-
-    // Step 3: Solve op(A22) * X2 = B2 (recursive, alpha=1 since B2 already scaled/updated)
-    trsm_recursive_left::<R, P>(
-        client,
-        uplo,
-        trans,
-        diag,
-        P::EA::from_int(1),  // alpha = 1.0
-        l22,
-        b2,
-        config,
-    )?;
-
-    Ok(())
-}
-
-/// Recursive TRSM for Right side: X * op(A) = alpha * B
-fn trsm_recursive_right<R: Runtime, P: LinalgPrecision>(
-    client: &ComputeClient<R::Server>,
-    uplo: Triangle,
-    trans: Transpose,
-    diag: Diagonal,
-    alpha: P::EA,
-    a: TensorHandleRef<R>,
-    b: TensorHandleRef<R>,
-    config: TrsmConfig,
-) -> LinalgResult<()>
-where
-    P::EW: Float + cubecl_matmul::components::MatmulPrecision + CubeElement,
-    P::EA: Float,
-{
-    let n = a.shape[0];  // A is n×n
-    let m = b.shape[0];  // B is m×n
-
-    // Partition: divide n by 2 (column-wise partitioning)
-    let n1 = n / 2;
-    let n2 = n - n1;
-
-    // For Right-Lower-Trans (what Cholesky needs):
-    // X * L^T = B, where L^T is upper triangular
-    // Partition column-wise:
-    // L = [L11   0 ]  =>  L^T = [L11^T  L21^T]
-    //     [L21  L22]            [ 0     L22^T]
-    //
-    // X = [X1 X2], B = [B1 B2]
-    //
-    // [X1 X2] * [L11^T  L21^T] = [B1 B2]
-    //            [ 0     L22^T]
-    //
-    // X1*L11^T = B1  and  X1*L21^T + X2*L22^T = B2
-    //
-    // Solve backward (since L^T is upper):
-    // 1. X2 * L22^T = B2  (recursive)
-    // 2. B1 := B1 - X2 * L21^T  (GEMM)
-    // 3. X1 * L11^T = B1  (recursive, alpha=1 since B1 already scaled)
-    //
-    // For Right-Upper-NoTrans and other variants, similar logic applies
-
-    // Create shape arrays
-    let a11_shape = vec![n1, n1];
-    let a12_shape = vec![n1, n2];  // For upper: A12; for lower transpose: L21^T part
-    let a21_shape = vec![n2, n1];  // For lower: A21
-    let a22_shape = vec![n2, n2];
-    let b1_shape = vec![m, n1];
-    let b2_shape = vec![m, n2];
-
-    // Determine which blocks we need based on uplo/trans
-    // For simplicity, create all blocks and use the relevant ones
-
-    // A11: a[0:n1, 0:n1]
-    let a11 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            a.handle,
-            &a.strides[..],
-            &a11_shape,
-            a.elem_size,
-        )
-    };
-
-    // A12 (upper) or A21^T (lower trans): a[0:n1, n1:n]
-    let a12_offset = (n1 * a.strides[1]) as u64;
-    let a12_handle = a.handle.clone().offset_start(a12_offset);
-    let a12 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            &a12_handle,
-            &a.strides[..],
-            &a12_shape,
-            a.elem_size,
-        )
-    };
-
-    // A21 (lower): a[n1:n, 0:n1]
-    let a21_offset = (n1 * a.strides[0]) as u64;
-    let a21_handle = a.handle.clone().offset_start(a21_offset);
-    let a21 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            &a21_handle,
-            &a.strides[..],
-            &a21_shape,
-            a.elem_size,
-        )
-    };
-
-    // A22: a[n1:n, n1:n]
-    let a22_offset = (n1 * a.strides[0] + n1 * a.strides[1]) as u64;
-    let a22_handle = a.handle.clone().offset_start(a22_offset);
-    let a22 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            &a22_handle,
-            &a.strides[..],
-            &a22_shape,
-            a.elem_size,
-        )
-    };
-
-    // B1: b[:, 0:n1]
-    let b1 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            b.handle,
-            &b.strides[..],
-            &b1_shape,
-            b.elem_size,
-        )
-    };
-
-    // B2: b[:, n1:n]
-    let b2_offset = (n1 * b.strides[1]) as u64;
-    let b2_handle = b.handle.clone().offset_start(b2_offset);
-    let b2 = unsafe {
-        TensorHandleRef::<R>::from_raw_parts(
-            &b2_handle,
-            &b.strides[..],
-            &b2_shape,
-            b.elem_size,
-        )
-    };
-
-    // Dispatch based on uplo/trans
-    match (uplo, trans) {
-        (Triangle::Lower, Transpose::Trans) | (Triangle::Upper, Transpose::NoTrans) => {
-            // Both are upper triangular effective (L^T or U)
-            // Solve backward: right to left
-            //
-            // 1. Solve X2 * A22 = alpha * B2
-            trsm_recursive_right::<R, P>(client, uplo, trans, diag, alpha, a22, b2, config)?;
-
-            // 2. Update B1 := alpha * B1 - X2 * A12  (for Upper) or B1 := alpha * B1 - X2 * A21^T (for Lower-Trans)
-            // For Lower-Trans: A21^T is the off-diagonal block
-            // Need temp = X2 * A21^T (which is B2 * A21^T)
-            type AccG<MP> = cubecl_matmul::components::AccG<MP>;
-            let temp_shape = vec![m, n1];
-            let temp = TensorHandle::<R>::empty(client, temp_shape.clone(), AccG::<P::EW>::as_type_native_unchecked());
-
-            let b2_handle_gemm = TensorHandle::new(b2.handle.clone(), b2.shape.to_vec(), b2.strides.to_vec(), P::EW::as_type_native_unchecked());
-            let off_diag_handle = if uplo == Triangle::Upper {
-                // Use A12
-                TensorHandle::new(a12.handle.clone(), a12.shape.to_vec(), a12.strides.to_vec(), P::EW::as_type_native_unchecked())
-            } else {
-                // Use A21^T (need to transpose)
-                // For A21^T, we multiply B2 * A21^T
-                // This is B2 [m, n2] * A21^T [n2, n1]
-                // A21 is [n2, n1], so A21^T is [n1, n2]
-                // But we pass A21 and use Transposed input handle
-                TensorHandle::new(a21.handle.clone(), a21.shape.to_vec(), a21.strides.to_vec(), P::EW::as_type_native_unchecked())
-            };
-
-            let input_b2 = MatmulInputHandle::Normal(b2_handle_gemm);
-
-            let mut input_offdiag = MatmulInputHandle::Normal(off_diag_handle);
-            if uplo == Triangle::Lower {
-                // Transpose A21 to get A21^T
-                input_offdiag.swap_dims(0, 1);
-            }
-
-            let _ = matmul::launch::<R>(
-                &MatmulStrategy::Auto,
+    // Launch appropriate GPU kernel based on variant
+    // These kernels handle all sizes - they're already parallel and GPU-resident
+    match (side, uplo, trans) {
+        (Side::Left, Triangle::Lower, Transpose::NoTrans) => {
+            trsm_left_lower_kernel::launch::<P::EW, R>(
                 client,
-                input_b2,
-                input_offdiag,
-                temp.clone(),
-                cubecl_matmul::components::MatmulElems::new::<P::EW>(),
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(256, 1, 1),
+                a.as_tensor_arg(1),
+                b.as_tensor_arg(1),
+                ScalarArg::new(alpha_bits),
             );
-
-            // Fused: B1 = alpha * B1 - temp
-            let alpha_bits = unsafe { mem::transmute_copy::<P::EA, P::EW>(&alpha) };
-            let total_elements = m * n1;
-            let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
-            let cube_dim = CubeDim::new(256, 1, 1);
-
-            unsafe {
-                fused_scale_sub_kernel::launch::<P::EW, R>(
-                    client,
-                    cube_count,
-                    cube_dim,
-                    b1.as_tensor_arg(1),
-                    temp.as_ref().as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-
-            // 3. Solve X1 * A11 = B1 (alpha=1 since B1 already scaled)
-            trsm_recursive_right::<R, P>(
-                client,
-                uplo,
-                trans,
-                diag,
-                P::EA::from_int(1),
-                a11,
-                b1,
-                config,
-            )?;
         }
-        (Triangle::Lower, Transpose::NoTrans) | (Triangle::Upper, Transpose::Trans) => {
-            // Both are lower triangular effective (L or U^T)
-            // Solve forward: left to right
-            //
-            // 1. Solve X1 * A11 = alpha * B1
-            trsm_recursive_right::<R, P>(client, uplo, trans, diag, alpha, a11, b1, config)?;
-
-            // 2. Update B2 := alpha * B2 - X1 * A21  (for Lower) or B2 := alpha * B2 - X1 * A12^T (for Upper-Trans)
-            type AccG<MP> = cubecl_matmul::components::AccG<MP>;
-            let temp_shape = vec![m, n2];
-            let temp = TensorHandle::<R>::empty(client, temp_shape.clone(), AccG::<P::EW>::as_type_native_unchecked());
-
-            let b1_handle_gemm = TensorHandle::new(b1.handle.clone(), b1.shape.to_vec(), b1.strides.to_vec(), P::EW::as_type_native_unchecked());
-            let off_diag_handle = if uplo == Triangle::Lower {
-                TensorHandle::new(a21.handle.clone(), a21.shape.to_vec(), a21.strides.to_vec(), P::EW::as_type_native_unchecked())
-            } else {
-                TensorHandle::new(a12.handle.clone(), a12.shape.to_vec(), a12.strides.to_vec(), P::EW::as_type_native_unchecked())
-            };
-
-            let mut input_offdiag = MatmulInputHandle::Normal(off_diag_handle);
-            if uplo == Triangle::Upper {
-                // Transpose A12 to get A12^T
-                input_offdiag.swap_dims(0, 1);
-            }
-
-            let _ = matmul::launch::<R>(
-                &MatmulStrategy::Auto,
+        (Side::Left, Triangle::Lower, Transpose::Trans) => {
+            trsm_left_lower_trans_kernel::launch::<P::EW, R>(
                 client,
-                MatmulInputHandle::Normal(b1_handle_gemm),
-                input_offdiag,
-                temp.clone(),
-                cubecl_matmul::components::MatmulElems::new::<P::EW>(),
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(256, 1, 1),
+                a.as_tensor_arg(1),
+                b.as_tensor_arg(1),
+                ScalarArg::new(alpha_bits),
             );
-
-            // Fused: B2 = alpha * B2 - temp
-            let alpha_bits = unsafe { mem::transmute_copy::<P::EA, P::EW>(&alpha) };
-            let total_elements = m * n2;
-            let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
-            let cube_dim = CubeDim::new(256, 1, 1);
-
-            unsafe {
-                fused_scale_sub_kernel::launch::<P::EW, R>(
-                    client,
-                    cube_count,
-                    cube_dim,
-                    b2.as_tensor_arg(1),
-                    temp.as_ref().as_tensor_arg(1),
-                    ScalarArg::new(alpha_bits),
-                );
-            }
-
-            // 3. Solve X2 * A22 = B2 (alpha=1 since B2 already scaled)
-            trsm_recursive_right::<R, P>(
+        }
+        (Side::Left, Triangle::Upper, Transpose::NoTrans) => {
+            trsm_left_upper_kernel::launch::<P::EW, R>(
                 client,
-                uplo,
-                trans,
-                diag,
-                P::EA::from_int(1),
-                a22,
-                b2,
-                config,
-            )?;
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(256, 1, 1),
+                a.as_tensor_arg(1),
+                b.as_tensor_arg(1),
+                ScalarArg::new(alpha_bits),
+            );
+        }
+        (Side::Left, Triangle::Upper, Transpose::Trans) => {
+            trsm_left_upper_trans_kernel::launch::<P::EW, R>(
+                client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(256, 1, 1),
+                a.as_tensor_arg(1),
+                b.as_tensor_arg(1),
+                ScalarArg::new(alpha_bits),
+            );
+        }
+        (Side::Right, Triangle::Lower, Transpose::NoTrans) => {
+            trsm_right_lower_kernel::launch::<P::EW, R>(
+                client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(256, 1, 1),
+                a.as_tensor_arg(1),
+                b.as_tensor_arg(1),
+                ScalarArg::new(alpha_bits),
+            );
+        }
+        (Side::Right, Triangle::Lower, Transpose::Trans) => {
+            trsm_right_lower_trans_kernel::launch::<P::EW, R>(
+                client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(256, 1, 1),
+                a.as_tensor_arg(1),
+                b.as_tensor_arg(1),
+                ScalarArg::new(alpha_bits),
+            );
+        }
+        (Side::Right, Triangle::Upper, Transpose::NoTrans) => {
+            trsm_right_upper_kernel::launch::<P::EW, R>(
+                client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(256, 1, 1),
+                a.as_tensor_arg(1),
+                b.as_tensor_arg(1),
+                ScalarArg::new(alpha_bits),
+            );
+        }
+        (Side::Right, Triangle::Upper, Transpose::Trans) => {
+            trsm_right_upper_trans_kernel::launch::<P::EW, R>(
+                client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(256, 1, 1),
+                a.as_tensor_arg(1),
+                b.as_tensor_arg(1),
+                ScalarArg::new(alpha_bits),
+            );
         }
         _ => {
             return Err(LinalgError::UnsupportedLayout {
-                layout: format!("Unsupported TRSM Right variant: {:?}-{:?}", uplo, trans),
+                layout: format!("Unsupported TRSM variant: {:?}-{:?}-{:?}", side, uplo, trans),
             });
         }
     }
 
     Ok(())
 }
+
+/// Recursive TRSM for Left side: op(A) * X = alpha * B
 
 /// Triangular matrix multiply: B = alpha * op(A) * B  or  B = alpha * B * op(A)
 ///

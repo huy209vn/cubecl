@@ -40,7 +40,7 @@ fn create_spd_matrix(client: &ComputeClient<<BenchRuntime as Runtime>::Server>, 
         }
     }
 
-    let handle = client.create(f32::as_bytes(&values).into());
+    let handle = client.create_from_slice(f32::as_bytes(&values));
     // TensorHandle::new(handle, shape, strides, storage)
     // For row-major n×n: shape=[n,n], strides=[n, 1]
     TensorHandle::new(handle, vec![n, n], vec![n, 1], f32::as_type_native_unchecked())

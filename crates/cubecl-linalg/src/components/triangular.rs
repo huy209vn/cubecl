@@ -733,82 +733,102 @@ where
     if k <= config.base_threshold {
         let alpha_bits = unsafe { mem::transmute_copy::<P::EA, P::EW>(&alpha) };
 
+        // Calculate thread block configuration
+        // CUDA limit: max 1024 threads per block
+        const MAX_THREADS_PER_BLOCK: u32 = 256;
+
         match (side, uplo, trans) {
             (Side::Left, Triangle::Lower, Transpose::NoTrans) => {
+                let threads = n.min(MAX_THREADS_PER_BLOCK as usize) as u32;
+                let blocks = ((n + threads as usize - 1) / threads as usize) as u32;
                 trsm_left_lower_kernel::launch::<P::EW, R>(
                     client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(n as u32, 1, 1),
+                    CubeCount::Static(blocks, 1, 1),
+                    CubeDim::new(threads, 1, 1),
                     a.as_tensor_arg(1),
                     b.as_tensor_arg(1),
                     ScalarArg::new(alpha_bits),
                 );
             }
             (Side::Left, Triangle::Lower, Transpose::Trans) => {
+                let threads = n.min(MAX_THREADS_PER_BLOCK as usize) as u32;
+                let blocks = ((n + threads as usize - 1) / threads as usize) as u32;
                 trsm_left_lower_trans_kernel::launch::<P::EW, R>(
                     client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(n as u32, 1, 1),
+                    CubeCount::Static(blocks, 1, 1),
+                    CubeDim::new(threads, 1, 1),
                     a.as_tensor_arg(1),
                     b.as_tensor_arg(1),
                     ScalarArg::new(alpha_bits),
                 );
             }
             (Side::Left, Triangle::Upper, Transpose::NoTrans) => {
+                let threads = n.min(MAX_THREADS_PER_BLOCK as usize) as u32;
+                let blocks = ((n + threads as usize - 1) / threads as usize) as u32;
                 trsm_left_upper_kernel::launch::<P::EW, R>(
                     client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(n as u32, 1, 1),
+                    CubeCount::Static(blocks, 1, 1),
+                    CubeDim::new(threads, 1, 1),
                     a.as_tensor_arg(1),
                     b.as_tensor_arg(1),
                     ScalarArg::new(alpha_bits),
                 );
             }
             (Side::Left, Triangle::Upper, Transpose::Trans) => {
+                let threads = n.min(MAX_THREADS_PER_BLOCK as usize) as u32;
+                let blocks = ((n + threads as usize - 1) / threads as usize) as u32;
                 trsm_left_upper_trans_kernel::launch::<P::EW, R>(
                     client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(n as u32, 1, 1),
+                    CubeCount::Static(blocks, 1, 1),
+                    CubeDim::new(threads, 1, 1),
                     a.as_tensor_arg(1),
                     b.as_tensor_arg(1),
                     ScalarArg::new(alpha_bits),
                 );
             }
             (Side::Right, Triangle::Lower, Transpose::NoTrans) => {
+                let threads = m.min(MAX_THREADS_PER_BLOCK as usize) as u32;
+                let blocks = ((m + threads as usize - 1) / threads as usize) as u32;
                 trsm_right_lower_kernel::launch::<P::EW, R>(
                     client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(m as u32, 1, 1),
+                    CubeCount::Static(blocks, 1, 1),
+                    CubeDim::new(threads, 1, 1),
                     a.as_tensor_arg(1),
                     b.as_tensor_arg(1),
                     ScalarArg::new(alpha_bits),
                 );
             }
             (Side::Right, Triangle::Lower, Transpose::Trans) => {
+                let threads = m.min(MAX_THREADS_PER_BLOCK as usize) as u32;
+                let blocks = ((m + threads as usize - 1) / threads as usize) as u32;
                 trsm_right_lower_trans_kernel::launch::<P::EW, R>(
                     client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(m as u32, 1, 1),
+                    CubeCount::Static(blocks, 1, 1),
+                    CubeDim::new(threads, 1, 1),
                     a.as_tensor_arg(1),
                     b.as_tensor_arg(1),
                     ScalarArg::new(alpha_bits),
                 );
             }
             (Side::Right, Triangle::Upper, Transpose::NoTrans) => {
+                let threads = m.min(MAX_THREADS_PER_BLOCK as usize) as u32;
+                let blocks = ((m + threads as usize - 1) / threads as usize) as u32;
                 trsm_right_upper_kernel::launch::<P::EW, R>(
                     client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(m as u32, 1, 1),
+                    CubeCount::Static(blocks, 1, 1),
+                    CubeDim::new(threads, 1, 1),
                     a.as_tensor_arg(1),
                     b.as_tensor_arg(1),
                     ScalarArg::new(alpha_bits),
                 );
             }
             (Side::Right, Triangle::Upper, Transpose::Trans) => {
+                let threads = m.min(MAX_THREADS_PER_BLOCK as usize) as u32;
+                let blocks = ((m + threads as usize - 1) / threads as usize) as u32;
                 trsm_right_upper_trans_kernel::launch::<P::EW, R>(
                     client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(m as u32, 1, 1),
+                    CubeCount::Static(blocks, 1, 1),
+                    CubeDim::new(threads, 1, 1),
                     a.as_tensor_arg(1),
                     b.as_tensor_arg(1),
                     ScalarArg::new(alpha_bits),

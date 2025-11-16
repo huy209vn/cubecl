@@ -361,40 +361,36 @@ where
     P::EA: Float,
 {
     // Step 1: Cholesky factorization
-    let (l, mut info) = cholesky::<R, P>(client, a, Triangle::Lower, false)?;
+    let (l, info) = cholesky::<R, P>(client, a, Triangle::Lower, false)?;
 
     // Step 2: Forward solve L * y = b
-    // TODO: Call trsm
-    // let y = trsm::<R, P>(
-    //     client,
-    //     Side::Left,
-    //     Triangle::Lower,
-    //     Transpose::NoTrans,
-    //     Diagonal::NonUnit,
-    //     1.0,
-    //     l.as_ref(),
-    //     b,
-    // )?;
+    let alpha_one = P::EA::from_int(1);
+    let y = trsm::<R, P>(
+        client,
+        Side::Left,
+        Triangle::Lower,
+        Transpose::NoTrans,
+        Diagonal::NonUnit,
+        alpha_one,
+        l.as_ref(),
+        b,
+    )?;
 
     // Step 3: Backward solve L^T * x = y
-    // TODO: Call trsm
-    // let x = trsm::<R, P>(
-    //     client,
-    //     Side::Left,
-    //     Triangle::Lower,
-    //     Transpose::Trans,
-    //     Diagonal::NonUnit,
-    //     1.0,
-    //     l.as_ref(),
-    //     y.as_ref(),
-    // )?;
+    let x = trsm::<R, P>(
+        client,
+        Side::Left,
+        Triangle::Lower,
+        Transpose::Trans,
+        Diagonal::NonUnit,
+        alpha_one,
+        l.as_ref(),
+        y.as_ref(),
+    )?;
 
-    // Placeholder for now
-    let x = TensorHandle::<R>::empty(client, b.shape.to_vec(), P::EW::as_type_native_unchecked());
-
-    // TODO: Compute residual and update info
-    // let residual = residual(a, x, b)?;
-    // info = info.with_residual(residual);
+    // Note: Could add residual computation for iterative refinement
+    // residual = || b - A*x || / || b ||
+    // For now, we rely on Cholesky conditioning info
 
     Ok((x, info))
 }
@@ -436,16 +432,64 @@ where
     // Step 1: Cholesky factorization
     let (l, info) = cholesky::<R, P>(client, a, Triangle::Lower, false)?;
 
+    let n = a.shape[a.shape.len() - 1];
+
     // Step 2: Invert L (triangular inversion)
-    // TODO: Implement triangular inversion
-    // Use repeated TRSM: solve L * X = I for X = L^{-1}
+    // Solve L * X = I for X = L^{-1}
+    // We do this by solving L * X = I using TRSM
+
+    // Create identity matrix
+    let identity = {
+        let size = n * n;
+        let mut id_data = vec![P::EW::from_int(0); size];
+        for i in 0..n {
+            id_data[i * n + i] = P::EW::from_int(1);
+        }
+        let handle = client.create_from_slice(P::EW::as_bytes(&id_data));
+        TensorHandle::new(handle, vec![n, n], vec![n, 1], P::EW::as_type_native_unchecked())
+    };
+
+    // Solve L * L_inv = I => L_inv = L^{-1}
+    let alpha_one = P::EA::from_int(1);
+    let l_inv = trsm::<R, P>(
+        client,
+        Side::Left,
+        Triangle::Lower,
+        Transpose::NoTrans,
+        Diagonal::NonUnit,
+        alpha_one,
+        l.as_ref(),
+        identity.as_ref(),
+    )?;
 
     // Step 3: Compute A^{-1} = L^{-T} * L^{-1}
-    // This is: A^{-1} = (L^{-1})^T * L^{-1}
-    // TODO: Use SYRK (symmetric rank-k) or GEMM
+    // Use SYRK: A^{-1} = L_inv^T * L_inv (symmetric rank-k update)
+    // We can use our syrk function with alpha=1, beta=0, starting from zeros
 
-    // Placeholder
     let a_inv = TensorHandle::<R>::empty(client, a.shape.to_vec(), P::EW::as_type_native_unchecked());
+
+    // Fill with zeros first
+    use crate::kernels::fill_kernel;
+    let total_elements: usize = a.shape.iter().product();
+    let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
+    let cube_dim = CubeDim::new(256, 1, 1);
+    fill_kernel::launch::<P::EW, R>(
+        client,
+        cube_count,
+        cube_dim,
+        a_inv.as_ref().as_tensor_arg(1),
+        ScalarArg::new(P::EW::from_int(0)),
+    );
+
+    // SYRK: A_inv = 1.0 * L_inv^T * L_inv + 0.0 * A_inv
+    // This computes the symmetric product
+    syrk::<R, P>(
+        client,
+        P::EA::from_int(1),  // alpha
+        l_inv.as_ref(),
+        P::EA::from_int(0),  // beta (ignore existing A_inv values)
+        a_inv.as_ref(),
+    )?;
 
     Ok((a_inv, info))
 }

@@ -180,8 +180,8 @@ pub fn extract_diagonal_minmax<F: Float>(
     let n_threads = CUBE_DIM_X;
 
     // Each thread processes subset of diagonal elements
-    let mut local_min = F::INFINITY;
-    let mut local_max = F::NEG_INFINITY;
+    let mut local_min = F::max_value();
+    let mut local_max = F::min_value();
 
     let mut i = tid;
     while i < nb {

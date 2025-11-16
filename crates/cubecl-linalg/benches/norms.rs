@@ -21,8 +21,8 @@ fn bench_l2_norm(size: usize) {
     println!("\n{} elements ({} MB)", size, size * 4 / 1_000_000);
 
     // Create input
-    let input = TensorHandle::<BenchRuntime, f32>::empty(&client, vec![size]);
-    random_uniform::<BenchRuntime, f32>(&client, f32::from_int(-1), f32::from_int(1), input.as_ref());
+    let input = TensorHandle::<BenchRuntime>::empty(&client, vec![size], f32::as_type_native_unchecked());
+    random_uniform::<BenchRuntime>(&client, f32::from_int(-1), f32::from_int(1), input.as_ref(), f32::as_type_native_unchecked());
 
     // Warmup
     for _ in 0..3 {
@@ -80,8 +80,8 @@ fn bench_linf_norm(size: usize) {
     println!("\n{} elements ({} MB)", size, size * 4 / 1_000_000);
 
     // Create input
-    let input = TensorHandle::<BenchRuntime, f32>::empty(&client, vec![size]);
-    random_uniform::<BenchRuntime, f32>(&client, f32::from_int(-1), f32::from_int(1), input.as_ref());
+    let input = TensorHandle::<BenchRuntime>::empty(&client, vec![size], f32::as_type_native_unchecked());
+    random_uniform::<BenchRuntime>(&client, f32::from_int(-1), f32::from_int(1), input.as_ref(), f32::as_type_native_unchecked());
 
     // Warmup
     for _ in 0..3 {
@@ -140,8 +140,8 @@ fn bench_frobenius_norm(rows: usize, cols: usize) {
     println!("\n{}×{} matrix ({} elements, {} MB)", rows, cols, size, size * 4 / 1_000_000);
 
     // Create input
-    let input = TensorHandle::<BenchRuntime, f32>::empty(&client, vec![rows, cols]);
-    random_uniform::<BenchRuntime, f32>(&client, f32::from_int(-1), f32::from_int(1), input.as_ref());
+    let input = TensorHandle::<BenchRuntime>::empty(&client, vec![rows, cols], f32::as_type_native_unchecked());
+    random_uniform::<BenchRuntime>(&client, f32::from_int(-1), f32::from_int(1), input.as_ref(), f32::as_type_native_unchecked());
 
     // Warmup
     for _ in 0..3 {

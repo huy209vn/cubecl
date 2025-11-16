@@ -26,7 +26,7 @@ type BenchRuntime = cubecl_cpu::CpuRuntime;
 ///
 /// Strategy: A = I*scale + noise
 /// This ensures eigenvalues > scale, making it SPD
-fn create_spd_matrix(client: &ComputeClient<<BenchRuntime as Runtime>::Server>, n: usize, scale: f32) -> TensorHandle<BenchRuntime, f32> {
+fn create_spd_matrix(client: &ComputeClient<<BenchRuntime as Runtime>::Server>, n: usize, scale: f32) -> TensorHandle<BenchRuntime> {
     let size = n * n;
     let mut values = vec![0.0_f32; size];
 
@@ -40,10 +40,10 @@ fn create_spd_matrix(client: &ComputeClient<<BenchRuntime as Runtime>::Server>, 
         }
     }
 
-    let handle = client.create(f32::as_bytes(&values));
-    // TensorHandle::new(handle, shape, strides)
+    let handle = client.create_from_slice(f32::as_bytes(&values));
+    // TensorHandle::new(handle, shape, strides, storage)
     // For row-major n×n: shape=[n,n], strides=[n, 1]
-    TensorHandle::new(handle, vec![n, n], vec![n, 1])
+    TensorHandle::new(handle, vec![n, n], vec![n, 1], f32::as_type_native_unchecked())
 }
 
 /// Benchmark Cholesky factorization for a specific matrix size
@@ -197,7 +197,6 @@ fn bench_conditioning() {
 fn main() {
     println!("╔═══════════════════════════════════════════════════════╗");
     println!("║    CubeCL Linear Algebra - Cholesky Benchmark         ║");
-    println!("║              Phase 1: SOTA Performance                ║");
     println!("╚═══════════════════════════════════════════════════════╝");
 
     // Main scalability benchmark

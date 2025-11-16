@@ -96,7 +96,7 @@ pub struct TrsmConfig {
 impl Default for TrsmConfig {
     fn default() -> Self {
         Self {
-            base_threshold: 64,  // Good default for most modern GPUs
+            base_threshold: 16,  // Small base blocks -> more work through fast GEMM
             workgroup_size_x: 16,
             workgroup_size_y: 16,
         }
@@ -107,11 +107,13 @@ impl TrsmConfig {
     /// Auto-tune configuration based on problem size
     pub fn auto_tune(problem_size: usize) -> Self {
         // Heuristic-based auto-tuning
-        // TODO: Profile-guided optimization for specific hardware
+        // Base kernels are slow (serial substitution) so keep blocks SMALL
+        // Let GEMM do the heavy lifting (100+ GFLOP/s vs 0.1 GFLOP/s for base)
         let base_threshold = match problem_size {
-            0..=256 => 32,
-            257..=1024 => 64,
-            _ => 128,
+            0..=64 => 16,     // Tiny: base kernel overhead minimal
+            65..=256 => 16,   // Small: still use tiny blocks
+            257..=1024 => 16, // Medium: GEMM dominates
+            _ => 16,          // Large: GEMM is 1000x faster than base
         };
 
         Self {

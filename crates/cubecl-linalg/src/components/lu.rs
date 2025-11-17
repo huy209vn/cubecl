@@ -60,6 +60,7 @@ use crate::{
     kernels::panel::lu_panel_kernel,
     kernels::pivot::{swap_rows, apply_permutation},
     kernels::elementwise::copy_kernel,
+    kernels::trailing_update::{trsm_panel_right_kernel, gemm_trailing_kernel},
 };
 
 /// Configuration for LU factorization
@@ -292,17 +293,54 @@ where
         }
 
         // ============================================
-        // STEP 3 & 4: TRSM + GEMM (TODO)
+        // STEP 3: TRSM - Update panel to the right
         // ============================================
-        // TODO: Add TRSM and GEMM trailing matrix updates
-        // This requires proper tensor slicing support or alternative approach
-        // For now, we just do panel factorization without trailing updates
-        // This means LU will only work correctly for single-panel matrices (N <= NB)
-        //
-        // To properly implement:
-        // 1. Either add tensor slicing support to CubeCL
-        // 2. Or write custom kernels that work with offsets
-        // 3. Or copy sub-matrices to temporary buffers (inefficient but works)
+        // Solve L * U12 = A12 where L is unit lower triangular
+        // This updates columns [k_end:n] in rows [k_start:k_end]
+
+        if k_end < n {
+            let n_cols_right = n - k_end;
+
+            unsafe {
+                trsm_panel_right_kernel::launch::<P::EW, R>(
+                    client,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new(((n_cols_right + 255) / 256) as u32, 1, 1),
+                    lu.as_ref().as_tensor_arg(1),
+                    ScalarArg::new(n as u32),
+                    ScalarArg::new(k_start as u32),
+                    ScalarArg::new(k_size as u32),
+                    ScalarArg::new(n_cols_right as u32),
+                );
+            }
+
+            // ============================================
+            // STEP 4: GEMM - Update trailing submatrix
+            // ============================================
+            // Compute A22 -= L21 * U12
+            // where L21 is [k_end:n, k_start:k_end] (below panel)
+            //       U12 is [k_start:k_end, k_end:n] (right of panel)
+            //       A22 is [k_end:n, k_end:n] (trailing submatrix)
+
+            let m_rows_trailing = n - k_end;
+            let total_elems = m_rows_trailing * n_cols_right;
+
+            if total_elems > 0 {
+                unsafe {
+                    gemm_trailing_kernel::launch::<P::EW, R>(
+                        client,
+                        CubeCount::Static(1, 1, 1),
+                        CubeDim::new(((total_elems + 255) / 256) as u32, 1, 1),
+                        lu.as_ref().as_tensor_arg(1),
+                        ScalarArg::new(n as u32),
+                        ScalarArg::new(k_start as u32),
+                        ScalarArg::new(k_size as u32),
+                        ScalarArg::new(m_rows_trailing as u32),
+                        ScalarArg::new(n_cols_right as u32),
+                    );
+                }
+            }
+        }
     }
 
     // Create SolveInfo

@@ -315,8 +315,11 @@ impl ScopeProcessing {
                     Operator::Not(op) => {
                         sanitize_constant_scalar_ref_elem(&mut op.input, ElemType::Bool);
                     }
-                    Operator::InitLine(_) => {
-                        // TODO: Sanitize based on elem
+                    Operator::InitLine(op) => {
+                        let out = &inst.out.unwrap();
+                        for input in op.inputs.iter_mut() {
+                            sanitize_constant_scalar_ref_var(input, out);
+                        }
                     }
                     Operator::CopyMemory(op) => {
                         sanitize_constant_scalar_ref_var(&mut op.input, &inst.out.unwrap());

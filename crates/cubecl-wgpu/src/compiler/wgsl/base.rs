@@ -21,7 +21,8 @@ pub enum Variable {
         item: Item,
         is_array: bool,
     },
-    // TODO: Potential cleanup, seems that variable is not used at all
+    // NOTE: This variant is never constructed and could be removed in a future cleanup.
+    // It exists only for backward compatibility but serves no functional purpose.
     LocalScalar {
         id: Id,
         elem: Elem,

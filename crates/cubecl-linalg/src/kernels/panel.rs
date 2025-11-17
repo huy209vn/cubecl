@@ -421,6 +421,7 @@ pub fn lu_panel_kernel<F: Float>(
     matrix: &mut Tensor<F>,  // Full matrix [N, N]
     n: u32,                   // Matrix dimension
     nb: u32,                  // Panel size
+    k_offset: u32,            // Global row/col offset where panel starts
     pivots: &mut Tensor<u32>,
     eps: F,
     info: &mut Tensor<u32>,
@@ -438,7 +439,7 @@ pub fn lu_panel_kernel<F: Float>(
     }
 
     // Column-by-column factorization
-    // For now, assume panel starts at (0,0) - will generalize later
+    // Panel starts at matrix[k_offset, k_offset]
     for j in 0..nb {
         // === STEP 1: FIND PIVOT (parallel reduction) ===
 
@@ -446,9 +447,12 @@ pub fn lu_panel_kernel<F: Float>(
         let mut local_max_row = j;
 
         // Each thread scans a subset of rows
+        // Search from diagonal downward within the panel
         let mut i = j + tid;
         while i < nb {
-            let val = matrix[i * n + j];
+            let global_row = k_offset + i;
+            let global_col = k_offset + j;
+            let val = matrix[global_row * n + global_col];
             let abs_val = F::abs(val);
             if abs_val > local_max_abs {
                 local_max_abs = abs_val;
@@ -465,16 +469,19 @@ pub fn lu_panel_kernel<F: Float>(
         let row_candidate = if is_max { local_max_row } else { u32::MAX.into() };
         let pivot_row = plane_min(row_candidate);
 
-        // Thread 0 records pivot
+        // Thread 0 records pivot (local index within panel)
         if tid == 0 {
             pivots[j] = pivot_row;
             pivot_row_shared[0] = pivot_row;
-            pivot_val_shared[0] = matrix[pivot_row * n + j];
+            // Read pivot value using global coordinates
+            let global_pivot_row = k_offset + pivot_row;
+            let global_col = k_offset + j;
+            pivot_val_shared[0] = matrix[global_pivot_row * n + global_col];
         }
 
         sync_cube();
 
-        let pivot_row = pivot_row_shared[0];
+        let pivot_row = pivot_row_shared[0];  // Local row index within panel
         let pivot_val = pivot_val_shared[0];
 
         // Check for singularity
@@ -488,13 +495,18 @@ pub fn lu_panel_kernel<F: Float>(
         }
 
         // === STEP 2: ROW SWAP (parallel across columns) ===
+        // Swap rows in global coordinates
 
         if pivot_row != j {
+            let global_row_j = k_offset + j;
+            let global_pivot_row = k_offset + pivot_row;
+
             let mut col = tid;
             while col < nb {
-                let temp = matrix[j * n + col];
-                matrix[j * n + col] = matrix[pivot_row * n + col];
-                matrix[pivot_row * n + col] = temp;
+                let global_col = k_offset + col;
+                let temp = matrix[global_row_j * n + global_col];
+                matrix[global_row_j * n + global_col] = matrix[global_pivot_row * n + global_col];
+                matrix[global_pivot_row * n + global_col] = temp;
                 col += n_threads;
             }
         }
@@ -502,20 +514,23 @@ pub fn lu_panel_kernel<F: Float>(
         sync_cube();
 
         // === STEP 3: SCALE COLUMN (parallel) ===
+        // Scale column j below the diagonal
 
         let inv_pivot = F::new(1.0) / pivot_val;
 
         let mut i = j + 1 + tid;
         while i < nb {
-            matrix[i * n + j] *= inv_pivot;
+            let global_row = k_offset + i;
+            let global_col = k_offset + j;
+            matrix[global_row * n + global_col] *= inv_pivot;
             i += n_threads;
         }
 
         sync_cube();
 
         // === STEP 4: TRAILING UPDATE (parallel across submatrix) ===
+        // Update A[i,k] -= A[i,j] * A[j,k] for i,k > j (Schur complement)
 
-        // Update A[i,k] -= A[i,j] * A[j,k] for i,k > j
         let global_id = ABSOLUTE_POS;
         let total_updates = (nb - j - 1) * (nb - j - 1);
 
@@ -527,10 +542,14 @@ pub fn lu_panel_kernel<F: Float>(
             let i = j + 1 + row_offset;
             let k = j + 1 + col_offset;
 
-            let aij = matrix[i * n + j];
-            let ajk = matrix[j * n + k];
+            let global_i = k_offset + i;
+            let global_j = k_offset + j;
+            let global_k = k_offset + k;
 
-            matrix[i * n + k] -= aij * ajk;
+            let aij = matrix[global_i * n + global_j];
+            let ajk = matrix[global_j * n + global_k];
+
+            matrix[global_i * n + global_k] -= aij * ajk;
 
             idx += n_threads;
         }

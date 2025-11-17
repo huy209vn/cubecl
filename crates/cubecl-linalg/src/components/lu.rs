@@ -231,7 +231,7 @@ where
         let info_tensor = TensorHandle::new(info_handle, vec![1], vec![1], u32::as_type_native_unchecked());
 
         // Launch panel factorization kernel
-        // Note: Kernel works with the full matrix and uses offsets
+        // Kernel works with global matrix and uses k_start offset
         let eps = P::EW::from_int(0); // For now, just check for exact zero pivots
         unsafe {
             lu_panel_kernel::launch::<P::EW, R>(
@@ -241,6 +241,7 @@ where
                 lu.as_ref().as_tensor_arg(1),
                 ScalarArg::new(n as u32),  // Total matrix size (needed for indexing)
                 ScalarArg::new(k_size as u32),  // Panel size
+                ScalarArg::new(k_start as u32),  // Offset where panel starts
                 pivots_tensor.as_ref().as_tensor_arg(1),
                 ScalarArg::new(eps),
                 info_tensor.as_ref().as_tensor_arg(1),

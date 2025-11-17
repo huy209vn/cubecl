@@ -5,7 +5,6 @@ use crate::{instructions::ReduceRequirements, precision::ReducePrecision};
 
 use super::{ReduceCoordinate, ReduceFamily, ReduceInstruction};
 
-// TODO Add to test framework.
 /// Return the item with the maximum value.
 #[derive(Debug, CubeType, Clone)]
 pub struct Max;

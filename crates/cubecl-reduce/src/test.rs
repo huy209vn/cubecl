@@ -316,6 +316,39 @@ macro_rules! impl_test_reduce_with_strategy {
                     };
                     test.test_sum::<$float, TestRuntime>(&Default::default());
                 }
+
+                #[test]
+                pub fn [< min_plane_ $use_planes _shared_ $shared _ $id >]() {
+                    let test = TestCase {
+                        shape: $shape.into(),
+                        stride: $stride.into(),
+                        axis: Some($axis),
+                        strategy: Some($crate::ReduceStrategy { use_planes: $use_planes, shared: $shared }),
+                    };
+                    test.test_min::<$float, TestRuntime>(&Default::default());
+                }
+
+                #[test]
+                pub fn [< max_plane_ $use_planes _shared_ $shared _ $id >]() {
+                    let test = TestCase {
+                        shape: $shape.into(),
+                        stride: $stride.into(),
+                        axis: Some($axis),
+                        strategy: Some($crate::ReduceStrategy { use_planes: $use_planes, shared: $shared }),
+                    };
+                    test.test_max::<$float, TestRuntime>(&Default::default());
+                }
+
+                #[test]
+                pub fn [< maxabs_plane_ $use_planes _shared_ $shared _ $id >]() {
+                    let test = TestCase {
+                        shape: $shape.into(),
+                        stride: $stride.into(),
+                        axis: Some($axis),
+                        strategy: Some($crate::ReduceStrategy { use_planes: $use_planes, shared: $shared }),
+                    };
+                    test.test_maxabs::<$float, TestRuntime>(&Default::default());
+                }
             )*
         }
     };
@@ -466,6 +499,88 @@ impl TestCase {
         for (input_index, value) in values.iter().enumerate() {
             if let Some(output_index) = self.to_output_index(input_index) {
                 expected[output_index] += *value;
+            }
+        }
+        expected
+    }
+
+    pub fn test_min<F, R>(&self, device: &R::Device)
+    where
+        F: ReducePrecision + std::fmt::Display,
+        F::EI: CubeElement + Float + std::fmt::Display,
+        R: Runtime,
+    {
+        let input_values: Vec<F::EI> = self.random_input_values();
+        let expected_values = match self.axis {
+            Some(axis) if self.stride[axis] == 0 => input_values.clone(),
+            _ => self.cpu_min(&input_values),
+        };
+        self.run_reduce_test::<F, F::EI, R, Min>(device, input_values, expected_values)
+    }
+
+    fn cpu_min<F: Float>(&self, values: &[F]) -> Vec<F> {
+        let mut expected = vec![F::max_value(); self.num_output_values()];
+
+        for (input_index, value) in values.iter().enumerate() {
+            if let Some(output_index) = self.to_output_index(input_index) {
+                if *value < expected[output_index] {
+                    expected[output_index] = *value;
+                }
+            }
+        }
+        expected
+    }
+
+    pub fn test_max<F, R>(&self, device: &R::Device)
+    where
+        F: ReducePrecision + std::fmt::Display,
+        F::EI: CubeElement + Float + std::fmt::Display,
+        R: Runtime,
+    {
+        let input_values: Vec<F::EI> = self.random_input_values();
+        let expected_values = match self.axis {
+            Some(axis) if self.stride[axis] == 0 => input_values.clone(),
+            _ => self.cpu_max(&input_values),
+        };
+        self.run_reduce_test::<F, F::EI, R, Max>(device, input_values, expected_values)
+    }
+
+    fn cpu_max<F: Float>(&self, values: &[F]) -> Vec<F> {
+        let mut expected = vec![F::min_value(); self.num_output_values()];
+
+        for (input_index, value) in values.iter().enumerate() {
+            if let Some(output_index) = self.to_output_index(input_index) {
+                if *value > expected[output_index] {
+                    expected[output_index] = *value;
+                }
+            }
+        }
+        expected
+    }
+
+    pub fn test_maxabs<F, R>(&self, device: &R::Device)
+    where
+        F: ReducePrecision + std::fmt::Display,
+        F::EI: CubeElement + Float + std::fmt::Display,
+        R: Runtime,
+    {
+        let input_values: Vec<F::EI> = self.random_input_values();
+        let expected_values = match self.axis {
+            Some(axis) if self.stride[axis] == 0 => input_values.iter().map(|v| v.abs()).collect(),
+            _ => self.cpu_maxabs(&input_values),
+        };
+        self.run_reduce_test::<F, F::EI, R, MaxAbs>(device, input_values, expected_values)
+    }
+
+    fn cpu_maxabs<F: Float>(&self, values: &[F]) -> Vec<F> {
+        let mut expected = vec![F::new(0.0); self.num_output_values()];
+
+        for (input_index, value) in values.iter().enumerate() {
+            if let Some(output_index) = self.to_output_index(input_index) {
+                let abs_value = value.abs();
+                if abs_value > expected[output_index] {
+                    expected[output_index] = abs_value;
+                }
             }
         }
         expected

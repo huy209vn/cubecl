@@ -5,8 +5,7 @@ use crate::{instructions::ReduceRequirements, precision::ReducePrecision};
 
 use super::{ReduceCoordinate, ReduceFamily, ReduceInstruction};
 
-// TODO Add to test framework.
-/// Return the item with the maximum absolute value.
+/// Return the minimum item.
 #[derive(Debug, CubeType, Clone)]
 pub struct Min;
 

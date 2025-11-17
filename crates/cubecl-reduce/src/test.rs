@@ -769,7 +769,6 @@ impl TestCase {
             .take(size)
             .map(|r| F::new(r as f32 * factor))
             .collect()
-        // (0..size).map(|x| F::from_int(x as i64)).collect() TODO DELETE
     }
 
     fn input_size(&self) -> usize {

@@ -126,13 +126,10 @@ impl<P: ReducePrecision> ReduceInstruction<P> for ArgMin {
             for k in 0..line_size {
                 let acc_element = accumulator.0[k];
                 let acc_coordinate = accumulator.1[k];
-                // TODO replace with select
-                if acc_element == min && acc_coordinate < coordinate {
-                    coordinate = acc_coordinate;
-                } else if acc_element < min {
-                    min = acc_element;
-                    coordinate = acc_coordinate;
-                }
+                let is_new_min = acc_element < min;
+                let is_tie_break = (acc_element == min) & (acc_coordinate < coordinate);
+                min = select(is_new_min, acc_element, min);
+                coordinate = select(is_new_min | is_tie_break, acc_coordinate, coordinate);
             }
             Out::cast_from(coordinate)
         } else {

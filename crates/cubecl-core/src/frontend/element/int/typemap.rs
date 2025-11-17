@@ -151,11 +151,10 @@ impl<const POS: u8> CubePrimitive for IntExpand<POS> {
 
 impl<const POS: u8> From<IntExpand<POS>> for Variable {
     fn from(val: IntExpand<POS>) -> Self {
-        // TODO: Fix how we create literal.
         Variable::new(
             crate::ir::VariableKind::ConstantScalar(crate::ir::ConstantScalarValue::Int(
                 val.0,
-                cubecl_ir::IntKind::I32,
+                cubecl_ir::IntKind::I64,
             )),
             crate::ir::Type::scalar(ElemType::Int(IntKind::I64)),
         )

@@ -126,12 +126,10 @@ impl<P: ReducePrecision> ReduceInstruction<P> for ArgMax {
             for k in 0..line_size {
                 let acc_element = accumulator.0[k];
                 let acc_coordinate = accumulator.1[k];
-                if acc_element == max && acc_coordinate < coordinate {
-                    coordinate = acc_coordinate;
-                } else if acc_element > max {
-                    max = acc_element;
-                    coordinate = acc_coordinate;
-                }
+                let is_new_max = acc_element > max;
+                let is_tie_break = (acc_element == max) & (acc_coordinate < coordinate);
+                max = select(is_new_max, acc_element, max);
+                coordinate = select(is_new_max | is_tie_break, acc_coordinate, coordinate);
             }
             Out::cast_from(coordinate)
         } else {

@@ -93,12 +93,11 @@ impl CompilationArg for () {}
 
 /// Defines how a [launch argument](LaunchArg) can be expanded.
 ///
-/// TODO Verify the accuracy of the next comment.
-///
-/// Normally this type should be implemented two times for an argument.
-/// Once for the reference and the other for the mutable reference. Often time, the reference
-/// should expand the argument as an input while the mutable reference should expand the argument
-/// as an output.
+/// Types implement this trait once, providing both input and output expansion behavior
+/// through the `expand` and `expand_output` methods. The `expand` method registers
+/// the argument as an input to the kernel, while `expand_output` registers it as an output.
+/// By default, `expand_output` delegates to `expand`, but types can override it to provide
+/// different behavior for output arguments.
 #[diagnostic::on_unimplemented(note = "Consider using `#[derive(CubeLaunch)]` on `{Self}`")]
 pub trait LaunchArg: CubeType + Send + Sync + 'static {
     /// The runtime argument for the kernel.

@@ -46,7 +46,7 @@
 
 use cubecl_core::prelude::*;
 use cubecl_std::tensor::TensorHandle;
-use cubecl_matmul::{self as matmul, launch as matmul_launch, components::MatmulPrecision};
+use cubecl_matmul::components::MatmulPrecision;
 
 #[cfg(feature = "std")]
 use std::vec::Vec;
@@ -60,7 +60,6 @@ use crate::{
     kernels::panel::lu_panel_kernel,
     kernels::pivot::{swap_rows, apply_permutation},
     kernels::elementwise::copy_kernel,
-    policy::get_block_config,
 };
 
 /// Configuration for LU factorization
@@ -183,10 +182,20 @@ where
     let nb = nb.min(n);  // Block size can't exceed matrix size
 
     // Copy input to output (in-place factorization)
-    let mut lu = client.create(a.handle.binding().elem_size, shape);
-    unsafe {
-        client.copy(a.handle.binding(), lu.binding());
-    }
+    let mut lu = TensorHandle::<R>::empty(client, shape.to_vec(), P::EW::as_type_native_unchecked());
+
+    // Copy A to LU using copy kernel
+    let total_elements = shape.iter().product::<usize>();
+    let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
+    let cube_dim = CubeDim::new(256, 1, 1);
+
+    copy_kernel::launch::<P::EW, R>(
+        client,
+        cube_count,
+        cube_dim,
+        a.as_tensor_arg(1),
+        lu.as_ref().as_tensor_arg(1),
+    );
 
     // Initialize permutation vector (identity)
     let mut perm: Vec<usize> = (0..n).collect();
@@ -204,36 +213,44 @@ where
         // ============================================
         // Factor panel A[k:N, k:k+NB] with partial pivoting
 
-        // Extract panel (view into lu matrix)
+        // Create offset view of lu matrix for panel
+        // Panel starts at lu[k_start, k_start] and has size (n-k_start) × k_size
         let panel_rows = n - k_start;
-        let panel = unsafe {
-            TensorHandleRef::<R>::from_raw_parts(
-                lu.handle,
-                &vec![n, 1],  // strides: row-major
-                &vec![panel_rows, k_size],
-                lu.handle.binding().elem_size,
-            )
-        };
+        let panel_offset = k_start * n + k_start;  // Offset to panel start in flattened array
+
+        // We'll work with the full lu tensor and use offsets in the kernel
+        // For now, just pass the full matrix (TODO: optimize with proper slicing)
 
         // Create tensors for panel factorization output
-        let pivots_handle = client.create_from_slice(&vec![0u32; k_size]);
-        let info_handle = client.create_from_slice(&vec![0u32; 1]);
+        let pivots_data = vec![0u32; k_size];
+        let pivots_handle = client.create_from_slice(u32::as_bytes(&pivots_data));
+        let pivots_tensor = TensorHandle::new(pivots_handle, vec![k_size], vec![1], u32::as_type_native_unchecked());
+
+        let info_data = vec![0u32; 1];
+        let info_handle = client.create_from_slice(u32::as_bytes(&info_data));
+        let info_tensor = TensorHandle::new(info_handle, vec![1], vec![1], u32::as_type_native_unchecked());
 
         // Launch panel factorization kernel
-        lu_panel_kernel::launch::<R, P::EW>(
-            client,
-            CubeCount::Static(1, 1, 1),
-            CubeDim::new(64, 1, 1),  // 64 threads per block
-            panel,
-            k_size as u32,
-            pivots_handle.as_ref(),
-            P::EW::new(config.pivot_threshold),
-            info_handle.as_ref(),
-        );
+        // Note: Kernel works with the full matrix and uses offsets
+        let eps = P::EW::from_int(0); // For now, just check for exact zero pivots
+        unsafe {
+            lu_panel_kernel::launch::<P::EW, R>(
+                client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new(64, 1, 1),  // 64 threads per block
+                lu.as_ref().as_tensor_arg(1),
+                ScalarArg::new(n as u32),  // Total matrix size (needed for indexing)
+                ScalarArg::new(k_size as u32),  // Panel size
+                pivots_tensor.as_ref().as_tensor_arg(1),
+                ScalarArg::new(eps),
+                info_tensor.as_ref().as_tensor_arg(1),
+            );
+        }
 
         // Check for singularity
-        let info_result = client.read(info_handle.binding());
-        let error_code = info_result.read::<u32>(0).unwrap();
+        let info_bytes = client.read_one(info_tensor.handle.clone());
+        let info_values = u32::from_bytes(&info_bytes);
+        let error_code = info_values[0];
         if error_code != 0 {
             let col = error_code - 1;
             return Err(LinalgError::SingularPivot {
@@ -243,9 +260,10 @@ where
         }
 
         // Read pivots and update global permutation
-        let panel_pivots = client.read(pivots_handle.binding());
+        let pivot_bytes = client.read_one(pivots_tensor.handle.clone());
+        let pivot_values = u32::from_bytes(&pivot_bytes);
         for j in 0..k_size {
-            let local_pivot = panel_pivots.read::<u32>(j).unwrap() as usize;
+            let local_pivot = pivot_values[j] as usize;
             let global_pivot = k_start + local_pivot;
 
             // Apply swap to permutation vector
@@ -273,107 +291,17 @@ where
         }
 
         // ============================================
-        // STEP 3: TRSM (Triangular Solve)
+        // STEP 3 & 4: TRSM + GEMM (TODO)
         // ============================================
-        if k_end < n {
-            // Solve U[k:k+NB, k+NB:N] = L[k:k+NB, k:k+NB]^-1 * A[k:k+NB, k+NB:N]
-            //
-            // This updates the top-right block of the trailing matrix
-
-            let trailing_cols = n - k_end;
-
-            // Extract L block (lower triangle of panel)
-            let l_block = unsafe {
-                TensorHandleRef::<R>::from_raw_parts(
-                    lu.handle,
-                    &vec![n, 1],
-                    &vec![k_size, k_size],
-                    lu.handle.binding().elem_size,
-                )
-            };
-
-            // Extract block to solve
-            let b_block = unsafe {
-                TensorHandleRef::<R>::from_raw_parts(
-                    lu.handle,
-                    &vec![n, 1],
-                    &vec![k_size, trailing_cols],
-                    lu.handle.binding().elem_size,
-                )
-            };
-
-            // TRSM: L * X = B  =>  X = L^-1 * B
-            let x = trsm::<R, P>(
-                client,
-                Side::Left,
-                Triangle::Lower,
-                Transpose::NoTrans,
-                Diagonal::Unit,  // L has unit diagonal
-                l_block,
-                b_block,
-            )?;
-
-            // Write result back to lu matrix
-            // (TODO: make TRSM support in-place operation)
-            unsafe {
-                client.copy(x.binding(), b_block.handle.binding());
-            }
-        }
-
-        // ============================================
-        // STEP 4: GEMM UPDATE (Trailing Matrix)
-        // ============================================
-        if k_end < n && (n - k_end) > 0 {
-            // Update: A[k+NB:N, k+NB:N] -= L[k+NB:N, k:k+NB] * U[k:k+NB, k+NB:N]
-            //
-            // This is the bulk of the work (~50%+ of FLOPs)
-            // Reuse highly-optimized cubecl-matmul
-
-            let trailing_rows = n - k_end;
-            let trailing_cols = n - k_end;
-
-            // L block: A[k+NB:N, k:k+NB]
-            let l_trailing = unsafe {
-                TensorHandleRef::<R>::from_raw_parts(
-                    lu.handle,
-                    &vec![n, 1],
-                    &vec![trailing_rows, k_size],
-                    lu.handle.binding().elem_size,
-                )
-            };
-
-            // U block: A[k:k+NB, k+NB:N]
-            let u_trailing = unsafe {
-                TensorHandleRef::<R>::from_raw_parts(
-                    lu.handle,
-                    &vec![n, 1],
-                    &vec![k_size, trailing_cols],
-                    lu.handle.binding().elem_size,
-                )
-            };
-
-            // C block: A[k+NB:N, k+NB:N]
-            let c_block = unsafe {
-                TensorHandleRef::<R>::from_raw_parts(
-                    lu.handle,
-                    &vec![n, 1],
-                    &vec![trailing_rows, trailing_cols],
-                    lu.handle.binding().elem_size,
-                )
-            };
-
-            // GEMM: C -= L * U
-            // TODO: Use cubecl-matmul properly with correct API
-            // For now, placeholder
-            // matmul_launch::<R, P::EW>(
-            //     client,
-            //     l_trailing,
-            //     u_trailing,
-            //     Some(c_block),
-            //     P::EW::new(-1.0),  // alpha = -1
-            //     P::EW::new(1.0),   // beta = 1
-            // )?;
-        }
+        // TODO: Add TRSM and GEMM trailing matrix updates
+        // This requires proper tensor slicing support or alternative approach
+        // For now, we just do panel factorization without trailing updates
+        // This means LU will only work correctly for single-panel matrices (N <= NB)
+        //
+        // To properly implement:
+        // 1. Either add tensor slicing support to CubeCL
+        // 2. Or write custom kernels that work with offsets
+        // 3. Or copy sub-matrices to temporary buffers (inefficient but works)
     }
 
     // Create SolveInfo
@@ -430,6 +358,7 @@ where
         Triangle::Lower,
         Transpose::NoTrans,
         Diagonal::Unit,  // L has unit diagonal
+        P::EA::from_int(1),  // alpha = 1.0
         lu,
         b_perm.as_ref(),
     )?;
@@ -441,6 +370,7 @@ where
         Triangle::Upper,
         Transpose::NoTrans,
         Diagonal::NonUnit,  // U has explicit diagonal
+        P::EA::from_int(1),  // alpha = 1.0
         lu,
         y.as_ref(),
     )?;
@@ -481,25 +411,19 @@ where
     let n = lu.shape[0];
 
     // Create identity matrix
-    let mut identity_data = vec![P::EW::new(0.0); n * n];
+    let mut identity_data = vec![P::EW::from_int(0); n * n];
     for i in 0..n {
-        identity_data[i * n + i] = P::EW::new(1.0);
+        identity_data[i * n + i] = P::EW::from_int(1);
     }
-    let identity = client.create_from_slice(&identity_data);
+    let identity_handle = client.create_from_slice(P::EW::as_bytes(&identity_data));
+    let identity = TensorHandle::new(identity_handle, vec![n, n], vec![n, 1], P::EW::as_type_native_unchecked());
 
     // Solve A * X = I using LU
     let inv = solve_lu::<R, P>(
         client,
         lu,
         perm,
-        unsafe {
-            TensorHandleRef::<R>::from_raw_parts(
-                identity.handle,
-                &vec![n, 1],
-                &vec![n, n],
-                identity.handle.binding().elem_size,
-            )
-        },
+        identity.as_ref(),
     )?;
 
     Ok(inv)

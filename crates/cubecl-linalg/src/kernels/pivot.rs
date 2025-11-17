@@ -45,14 +45,14 @@ where
 
     // Simple CPU-side search for max absolute value
     // This is a temporary implementation - will be replaced with GPU kernel
-    let data = client.read(column.handle.binding());
-    let slice = data.as_slice::<P::EW>();
+    let bytes = client.read_one(column.handle.clone());
+    let slice = P::EW::from_bytes(&bytes);
 
-    let mut max_abs = 0.0f32;
+    let mut max_abs = P::EW::new(0.0);
     let mut max_idx = 0;
 
     for (i, &val) in slice.iter().enumerate() {
-        let abs_val = val.abs().to_f32();
+        let abs_val = P::EW::abs(val);
         if abs_val > max_abs {
             max_abs = abs_val;
             max_idx = i;
@@ -60,7 +60,17 @@ where
     }
 
     let pivot_idx = start_row + max_idx;
-    Ok((pivot_idx, max_abs))
+    // Convert P::EW to f32
+    // This works for both f32 and f64 EW types
+    let max_abs_f32 = if core::mem::size_of::<P::EW>() == 4 {
+        // f32 case - transmute directly
+        unsafe { core::mem::transmute_copy::<P::EW, f32>(&max_abs) }
+    } else {
+        // f64 case - transmute and truncate
+        let max_abs_f64 = unsafe { core::mem::transmute_copy::<P::EW, f64>(&max_abs) };
+        max_abs_f64 as f32
+    };
+    Ok((pivot_idx, max_abs_f32))
 }
 
 /// Swap two rows of a matrix efficiently
@@ -74,7 +84,7 @@ where
 #[cube(launch)]
 pub fn swap_rows_kernel<F: Float>(
     a: &mut Tensor<F>,
-    #[comptime] n_cols: u32,
+    n_cols: u32,
     row1: u32,
     row2: u32,
 ) {
@@ -116,15 +126,17 @@ where
     }
 
     // Launch kernel with one thread per column
-    swap_rows_kernel::launch::<R, P::EW>(
-        client,
-        CubeCount::Static(1, 1, 1),
-        CubeDim::new((n_cols as u32 + 255) / 256, 1, 1),
-        a.as_ref(),
-        n_cols as u32,
-        row1 as u32,
-        row2 as u32,
-    );
+    unsafe {
+        swap_rows_kernel::launch::<P::EW, R>(
+            client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new((n_cols as u32 + 255) / 256, 1, 1),
+            a.as_ref().as_tensor_arg(1),
+            ScalarArg::new(n_cols as u32),
+            ScalarArg::new(row1 as u32),
+            ScalarArg::new(row2 as u32),
+        );
+    }
 
     Ok(())
 }
@@ -137,7 +149,7 @@ pub fn apply_permutation_kernel<F: Float>(
     input: &Tensor<F>,
     output: &mut Tensor<F>,
     perm: &Tensor<u32>,
-    #[comptime] n: u32,
+    n: u32,
 ) {
     let i = ABSOLUTE_POS;
 
@@ -166,22 +178,25 @@ where
     }
 
     // Create output tensor
-    let output = client.create(vec.handle.binding().elem_size, &vec.shape);
+    let output = TensorHandle::<R>::empty(client, vec.shape.to_vec(), P::EW::as_type_native_unchecked());
 
     // Convert permutation to device tensor
     let perm_u32: Vec<u32> = perm.iter().map(|&x| x as u32).collect();
-    let perm_handle = client.create_from_slice(&perm_u32);
+    let perm_handle = client.create_from_slice(u32::as_bytes(&perm_u32));
+    let perm_tensor = TensorHandle::new(perm_handle, vec![n], vec![1], u32::as_type_native_unchecked());
 
     // Launch kernel
-    apply_permutation_kernel::launch::<R, P::EW>(
-        client,
-        CubeCount::Static(1, 1, 1),
-        CubeDim::new((n as u32 + 255) / 256, 1, 1),
-        vec,
-        output.as_ref(),
-        perm_handle.as_ref(),
-        n as u32,
-    );
+    unsafe {
+        apply_permutation_kernel::launch::<P::EW, R>(
+            client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new((n as u32 + 255) / 256, 1, 1),
+            vec.as_tensor_arg(1),
+            output.as_ref().as_tensor_arg(1),
+            perm_tensor.as_ref().as_tensor_arg(1),
+            ScalarArg::new(n as u32),
+        );
+    }
 
     Ok(output)
 }
@@ -207,7 +222,7 @@ pub fn warp_find_pivot<F: Float>(
         F::new(0.0)
     };
 
-    let my_abs = my_val.abs();
+    let my_abs = F::abs(my_val);
 
     // Use plane_max to find maximum across warp
     let max_abs = plane_max(my_abs);
@@ -221,7 +236,7 @@ pub fn warp_find_pivot<F: Float>(
 
     // Find first set bit (this gives us the pivot lane)
     // For simplicity, broadcast from all lanes that match and take the first
-    let pivot_lane = if is_pivot { lane_id } else { u32::MAX };
+    let pivot_lane = if is_pivot { lane_id } else { u32::MAX.into() };
     let final_pivot_lane = plane_min(pivot_lane);
 
     // Broadcast the value from pivot lane

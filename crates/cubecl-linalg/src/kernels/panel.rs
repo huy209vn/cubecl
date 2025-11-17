@@ -282,7 +282,7 @@ pub fn lu_micro_panel_kernel<F: Float>(
             F::new(0.0)
         };
 
-        let my_abs = my_val.abs();
+        let my_abs = F::abs(my_val);
 
         // Find max absolute value using plane reduction
         let max_abs = plane_max(my_abs);
@@ -291,7 +291,7 @@ pub fn lu_micro_panel_kernel<F: Float>(
         let is_pivot_lane = (my_abs == max_abs) && (lane_id < rows_per_warp);
 
         // Get pivot lane ID (first lane with max value)
-        let pivot_lane_candidate = if is_pivot_lane { lane_id } else { u32::MAX };
+        let pivot_lane_candidate = if is_pivot_lane { lane_id } else { u32::MAX.into() };
         let pivot_lane = plane_min(pivot_lane_candidate);
 
         // Warp leader records this warp's pivot candidate in shared memory
@@ -418,8 +418,9 @@ pub fn lu_micro_panel_kernel<F: Float>(
 ///
 #[cube(launch)]
 pub fn lu_panel_kernel<F: Float>(
-    panel: &mut Tensor<F>,
-    nb: u32,
+    matrix: &mut Tensor<F>,  // Full matrix [N, N]
+    n: u32,                   // Matrix dimension
+    nb: u32,                  // Panel size
     pivots: &mut Tensor<u32>,
     eps: F,
     info: &mut Tensor<u32>,
@@ -437,6 +438,7 @@ pub fn lu_panel_kernel<F: Float>(
     }
 
     // Column-by-column factorization
+    // For now, assume panel starts at (0,0) - will generalize later
     for j in 0..nb {
         // === STEP 1: FIND PIVOT (parallel reduction) ===
 
@@ -446,8 +448,8 @@ pub fn lu_panel_kernel<F: Float>(
         // Each thread scans a subset of rows
         let mut i = j + tid;
         while i < nb {
-            let val = panel[i * nb + j];
-            let abs_val = val.abs();
+            let val = matrix[i * n + j];
+            let abs_val = F::abs(val);
             if abs_val > local_max_abs {
                 local_max_abs = abs_val;
                 local_max_row = i;
@@ -459,15 +461,15 @@ pub fn lu_panel_kernel<F: Float>(
         let global_max = plane_max(local_max_abs);
 
         // Find which thread has the max
-        let is_max = (local_max_abs == global_max);
-        let row_candidate = if is_max { local_max_row } else { u32::MAX };
+        let is_max = local_max_abs == global_max;
+        let row_candidate = if is_max { local_max_row } else { u32::MAX.into() };
         let pivot_row = plane_min(row_candidate);
 
         // Thread 0 records pivot
         if tid == 0 {
             pivots[j] = pivot_row;
             pivot_row_shared[0] = pivot_row;
-            pivot_val_shared[0] = panel[pivot_row * nb + j];
+            pivot_val_shared[0] = matrix[pivot_row * n + j];
         }
 
         sync_cube();
@@ -476,7 +478,7 @@ pub fn lu_panel_kernel<F: Float>(
         let pivot_val = pivot_val_shared[0];
 
         // Check for singularity
-        let is_singular = pivot_val.abs() < eps;
+        let is_singular = F::abs(pivot_val) < eps;
         if is_singular {
             if tid == 0 {
                 info[0] = j + 1;
@@ -490,9 +492,9 @@ pub fn lu_panel_kernel<F: Float>(
         if pivot_row != j {
             let mut col = tid;
             while col < nb {
-                let temp = panel[j * nb + col];
-                panel[j * nb + col] = panel[pivot_row * nb + col];
-                panel[pivot_row * nb + col] = temp;
+                let temp = matrix[j * n + col];
+                matrix[j * n + col] = matrix[pivot_row * n + col];
+                matrix[pivot_row * n + col] = temp;
                 col += n_threads;
             }
         }
@@ -505,7 +507,7 @@ pub fn lu_panel_kernel<F: Float>(
 
         let mut i = j + 1 + tid;
         while i < nb {
-            panel[i * nb + j] *= inv_pivot;
+            matrix[i * n + j] *= inv_pivot;
             i += n_threads;
         }
 
@@ -525,10 +527,10 @@ pub fn lu_panel_kernel<F: Float>(
             let i = j + 1 + row_offset;
             let k = j + 1 + col_offset;
 
-            let aij = panel[i * nb + j];
-            let ajk = panel[j * nb + k];
+            let aij = matrix[i * n + j];
+            let ajk = matrix[j * n + k];
 
-            panel[i * nb + k] -= aij * ajk;
+            matrix[i * n + k] -= aij * ajk;
 
             idx += n_threads;
         }

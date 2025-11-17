@@ -26,7 +26,7 @@
 use cubecl_core::prelude::*;
 use cubecl_std::tensor::TensorHandle;
 
-use crate::{LinalgResult, LinalgError};
+use crate::{LinalgResult, LinalgError, LinalgPrecision};
 
 /// Default tile size for most operations
 pub const DEFAULT_TILE_SIZE: usize = 128;
@@ -51,11 +51,14 @@ pub fn get_tile_size(n: usize) -> usize {
 ///
 /// # Returns
 /// Matrix in tile-blocked layout with same logical shape
-pub fn to_tile_layout<R: Runtime>(
+pub fn to_tile_layout<R: Runtime, P: LinalgPrecision>(
     client: &ComputeClient<R::Server>,
     a: TensorHandleRef<R>,
     tile_size: usize,
-) -> LinalgResult<TensorHandle<R>> {
+) -> LinalgResult<TensorHandle<R>>
+where
+    P::EW: Float + CubeElement,
+{
     let shape = &a.shape;
     if shape.len() < 2 {
         return Err(LinalgError::InvalidShape {
@@ -66,18 +69,15 @@ pub fn to_tile_layout<R: Runtime>(
     let m = shape[shape.len() - 2];
     let n = shape[shape.len() - 1];
 
-    // For now, just copy the matrix as-is (TODO: implement actual tiling)
+    // For now, just return a clone of the input (TODO: implement actual tiling)
     // This is a placeholder for the tile transformation kernel
-    let output = client.create(a.handle.binding().elem_size, a.shape.len());
-
-    unsafe {
-        client.copy(
-            a.handle.binding(),
-            output.binding(),
-        );
-    }
-
-    Ok(output)
+    // In the real implementation, this would rearrange memory into tile-blocked layout
+    Ok(TensorHandle::new(
+        a.handle.clone(),
+        a.shape.to_vec(),
+        a.strides.to_vec(),
+        P::EW::as_type_native_unchecked(),
+    ))
 }
 
 /// Convert a tile-blocked matrix back to standard row-major layout
@@ -89,22 +89,23 @@ pub fn to_tile_layout<R: Runtime>(
 ///
 /// # Returns
 /// Matrix in standard row-major layout
-pub fn from_tile_layout<R: Runtime>(
+pub fn from_tile_layout<R: Runtime, P: LinalgPrecision>(
     client: &ComputeClient<R::Server>,
     a_tiled: TensorHandleRef<R>,
     tile_size: usize,
-) -> LinalgResult<TensorHandle<R>> {
-    // For now, just copy the matrix (TODO: implement actual detiling)
-    let output = client.create(a_tiled.handle.binding().elem_size, a_tiled.shape.len());
-
-    unsafe {
-        client.copy(
-            a_tiled.handle.binding(),
-            output.binding(),
-        );
-    }
-
-    Ok(output)
+) -> LinalgResult<TensorHandle<R>>
+where
+    P::EW: Float + CubeElement,
+{
+    // For now, just return a clone of the input (TODO: implement actual detiling)
+    // This is a placeholder for the detiling kernel
+    // In the real implementation, this would convert from tile-blocked to row-major layout
+    Ok(TensorHandle::new(
+        a_tiled.handle.clone(),
+        a_tiled.shape.to_vec(),
+        a_tiled.strides.to_vec(),
+        P::EW::as_type_native_unchecked(),
+    ))
 }
 
 // TODO: Implement actual tiling kernels

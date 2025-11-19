@@ -36,7 +36,7 @@ use std::string::ToString;
 use alloc::string::ToString;
 
 use crate::{LinalgPrecision, LinalgResult, LinalgError};
-use crate::kernels::{fused_scale_sub_kernel, fused_axpby_kernel, transpose_kernel, copy_kernel};
+use crate::kernels::{fused_scale_sub_kernel, fused_axpby_kernel, copy_kernel};
 
 /// Side parameter for BLAS operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1480,22 +1480,17 @@ where
     use cubecl_matmul::components::MatmulElems;
 
     // Create transposed A: A_T[k,m] from A[m,k]
+    // Using optimized tiled transpose from cubecl-std
     let a_t_shape = vec![k, m];
     let a_t = TensorHandle::<R>::empty(client, a_t_shape.clone(), P::EW::as_type_native_unchecked());
 
-    // Transpose kernel: simple parallel copy with swapped indices
-    let total_elements = m * k;
-    let cube_count = CubeCount::Static(((total_elements + 255) / 256) as u32, 1, 1);
-    let cube_dim = CubeDim::new(256, 1, 1);
-
-    transpose_kernel::launch::<P::EW, R>(
+    // Optimized transpose: A[m,k] -> A_T[k,m]
+    // Permutation [1,0] swaps dimensions: (0,1) -> (1,0)
+    cubecl_std::tensor::permute::launch::<R, P::EW>(
         client,
-        cube_count,
-        cube_dim,
-        a_handle.as_ref().as_tensor_arg(1),
-        a_t.as_ref().as_tensor_arg(1),
-        ScalarArg::new(m as u32),
-        ScalarArg::new(k as u32),
+        &a_handle,
+        &[1, 0],  // Transpose: swap dimensions 0 and 1
+        &a_t,
     );
 
     // Now compute: temp = A[m,k] * A_T[k,m] = A * A^T

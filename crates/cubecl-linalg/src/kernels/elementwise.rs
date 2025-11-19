@@ -116,26 +116,3 @@ pub fn fused_axpby_kernel<F: Float>(
     }
 }
 
-/// Matrix transpose: out[j,i] = input[i,j]
-///
-/// Transposes a matrix from shape [m,n] to [n,m].
-/// Each thread handles one element.
-#[cube(launch)]
-pub fn transpose_kernel<F: Float>(
-    input: &Tensor<F>,
-    output: &mut Tensor<F>,
-    m: u32,
-    n: u32,
-) {
-    let idx = ABSOLUTE_POS;
-    let total = m * n;
-
-    if idx < total {
-        // input is [m, n] row-major: input[i,j] = input[i*n + j]
-        let i = idx / n;
-        let j = idx % n;
-
-        // output is [n, m] row-major: output[j,i] = output[j*m + i]
-        output[j * m + i] = input[i * n + j];
-    }
-}

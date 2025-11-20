@@ -461,15 +461,31 @@ pub fn lu_panel_kernel<F: Float>(
             i += n_threads;
         }
 
-        // Reduce using plane operations
-        let global_max = plane_max(local_max_abs);
+        // Reduce using shared memory instead of plane operations
+        // This avoids CUDA uniformity analysis failures
 
-        // Find which thread has the max
-        let is_max = local_max_abs == global_max;
-        let row_candidate = if is_max { local_max_row } else { u32::MAX.into() };
-        let pivot_row = plane_min(row_candidate);
+        let mut max_shared = SharedMemory::<F>::new(n_threads);
+        let mut row_shared = SharedMemory::<u32>::new(n_threads);
 
-        // Thread 0 records pivot (local index within panel)
+        max_shared[tid] = local_max_abs;
+        row_shared[tid] = local_max_row;
+
+        sync_cube();
+
+        // Sequential reduction in thread 0
+        let mut global_max = F::new(0.0);
+        let mut pivot_row = j;
+
+        if tid == 0 {
+            for t in 0..n_threads {
+                if max_shared[t] > global_max {
+                    global_max = max_shared[t];
+                    pivot_row = row_shared[t];
+                }
+            }
+        }
+
+        // Thread 0 records pivot and broadcasts results
         if tid == 0 {
             pivots[j] = pivot_row;
             pivot_row_shared[0] = pivot_row;
@@ -481,6 +497,7 @@ pub fn lu_panel_kernel<F: Float>(
 
         sync_cube();
 
+        // All threads read broadcasted values
         let pivot_row = pivot_row_shared[0];  // Local row index within panel
         let pivot_val = pivot_val_shared[0];
 

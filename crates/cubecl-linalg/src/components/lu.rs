@@ -60,7 +60,7 @@ use crate::{
     kernels::panel::lu_panel_kernel,
     kernels::pivot::{swap_rows, apply_permutation},
     kernels::elementwise::copy_kernel,
-    kernels::trailing_update::{trsm_panel_right_kernel, gemm_trailing_update},
+    kernels::trailing_update::gemm_trailing_update,
 };
 
 /// Configuration for LU factorization
@@ -297,22 +297,66 @@ where
         // ============================================
         // Solve L * U12 = A12 where L is unit lower triangular
         // This updates columns [k_end:n] in rows [k_start:k_end]
+        //
+        // Using OPTIMIZED blocked TRSM from triangular.rs (~100+ GFLOP/s)
+        // instead of naive serial loops (~0.1 GFLOP/s)
 
         if k_end < n {
             let n_cols_right = n - k_end;
 
-            unsafe {
-                trsm_panel_right_kernel::launch::<P::EW, R>(
-                    client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new(((n_cols_right + 255) / 256) as u32, 1, 1),
-                    lu.as_ref().as_tensor_arg(1),
-                    ScalarArg::new(n as u32),
-                    ScalarArg::new(k_start as u32),
-                    ScalarArg::new(k_size as u32),
-                    ScalarArg::new(n_cols_right as u32),
-                );
-            }
+            let lu_ref = lu.as_ref();
+
+            // Extract L panel [k_start:k_end, k_start:k_end] - unit lower triangular
+            let l_offset = (k_start * lu_ref.strides[0] + k_start * lu_ref.strides[1]) as u64;
+            let l_handle = lu_ref.handle.clone().offset_start(l_offset);
+            let l_shape = vec![k_size, k_size];
+            let l_panel = unsafe {
+                TensorHandleRef::<R>::from_raw_parts(
+                    &l_handle,
+                    &lu_ref.strides[..],
+                    &l_shape,
+                    lu_ref.elem_size,
+                )
+            };
+
+            // Extract U12 panel [k_start:k_end, k_end:n] - to be solved
+            let u12_offset = (k_start * lu_ref.strides[0] + k_end * lu_ref.strides[1]) as u64;
+            let u12_handle = lu_ref.handle.clone().offset_start(u12_offset);
+            let u12_shape = vec![k_size, n_cols_right];
+            let u12_panel = unsafe {
+                TensorHandleRef::<R>::from_raw_parts(
+                    &u12_handle,
+                    &lu_ref.strides[..],
+                    &u12_shape,
+                    lu_ref.elem_size,
+                )
+            };
+
+            // Solve L * X = B => X = L^-1 * B using optimized TRSM
+            let alpha = P::EA::from_int(1);
+            let x = trsm::<R, P>(
+                client,
+                Side::Left,
+                Triangle::Lower,
+                Transpose::NoTrans,
+                Diagonal::Unit,  // L has unit diagonal
+                alpha,
+                l_panel,
+                u12_panel,
+            )?;
+
+            // Write result back (TODO: make TRSM support in-place)
+            let total_elems = k_size * n_cols_right;
+            let cube_count = CubeCount::Static(((total_elems + 255) / 256) as u32, 1, 1);
+            let cube_dim = CubeDim::new(256, 1, 1);
+
+            copy_kernel::launch::<P::EW, R>(
+                client,
+                cube_count,
+                cube_dim,
+                x.as_ref().as_tensor_arg(1),
+                u12_panel.as_tensor_arg(1),
+            );
 
             // ============================================
             // STEP 4: GEMM - Update trailing submatrix

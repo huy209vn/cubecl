@@ -17,17 +17,19 @@ use cubecl_matmul::{self as matmul, MatmulInputHandle, Strategy as MatmulStrateg
 use crate::{LinalgPrecision, LinalgResult, LinalgError};
 use crate::kernels::fused_scale_sub_kernel;
 
-/// Update columns to the right of factored panel using triangular solve
+/// ⚠️ DEPRECATED: Naive serial TRSM kernel (~0.1 GFLOP/s)
 ///
+/// **DO NOT USE** - This was replaced with optimized blocked TRSM from triangular.rs (~100+ GFLOP/s)
+/// Kept here for compatibility only.
+///
+/// Update columns to the right of factored panel using triangular solve
 /// Solves L * U12 = A12 where L is unit lower triangular
 /// This is equivalent to forward substitution for each column
 ///
-/// # Arguments
-/// * `matrix` - Full matrix [N, N], updated in-place
-/// * `n` - Matrix dimension
-/// * `k_start` - Panel start row/col
-/// * `nb` - Panel size
-/// * `n_cols` - Number of columns to update (from k_end to n)
+/// # WARNING
+/// This implementation uses serial nested loops and is extremely slow (~0.1 GFLOP/s).
+/// Use the optimized `trsm()` function from `components::triangular` instead.
+#[allow(dead_code)]
 #[cube(launch)]
 pub fn trsm_panel_right_kernel<F: Float>(
     matrix: &mut Tensor<F>,

@@ -1,0 +1,19 @@
+[package]
+name = "cubecl-sparse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GPU-accelerated sparse tensor operations for CubeCL"
+
+[dependencies]
+cubecl-core = { path = "../cubecl-core", version = "0.9.0-pre.2", default-features = false }
+cubecl-runtime = { path = "../cubecl-runtime", version = "0.9.0-pre.2", default-features = false }
+
+[dev-dependencies]
+cubecl = { path = "../cubecl", version = "0.9.0-pre.2", features = ["cuda", "wgpu"] }
+criterion = "0.7.0"
+
+[features]
+default = []
+cuda = ["cubecl/cuda"]
+wgpu = ["cubecl/wgpu"]

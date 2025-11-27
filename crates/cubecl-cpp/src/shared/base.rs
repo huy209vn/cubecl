@@ -1,19 +1,16 @@
 use std::{collections::HashSet, fmt::Debug};
 
 use cubecl_common::ExecutionMode;
+use cubecl_core::ir::{self as gpu};
 use cubecl_core::ir::{FloatKind, InstructionModes, Processor, UIntKind, VariableKind};
 use cubecl_core::post_processing::checked_io::CheckedIoProcessor;
-use cubecl_core::{
-    Compiler,
-    ir::{self as gpu},
-};
 use cubecl_core::{CubeDim, ir::ElemType};
 use cubecl_core::{
     ir::{Operation, SourceLoc},
     prelude::{FastMath, KernelDefinition},
 };
 use cubecl_opt::{Optimizer, SharedLiveness};
-use cubecl_runtime::{DeviceProperties, EnumSet, TypeUsage};
+use cubecl_runtime::{DeviceProperties, EnumSet, TypeUsage, compiler::Compiler};
 
 use crate::shared::MmaShape;
 
@@ -822,9 +819,20 @@ impl<D: Dialect> CppCompiler<D> {
                 factor,
                 transpose,
             },
-            gpu::CoopMma::StoreMatrix { .. } => {
-                todo!()
-            }
+            gpu::CoopMma::StoreMatrix {
+                offset,
+                line_size,
+                registers,
+                factor,
+                transpose,
+            } => WmmaInstruction::StMatrix {
+                registers: self.compile_variable(registers),
+                buffer: out,
+                offset: self.compile_variable(offset),
+                line_size,
+                factor,
+                transpose,
+            },
             gpu::CoopMma::Cast { input } => WmmaInstruction::Cast {
                 input: self.compile_variable(input),
                 output: out,
@@ -1781,7 +1789,7 @@ impl<D: Dialect> CppCompiler<D> {
         }
     }
 
-    fn compile_binding(&mut self, binding: cubecl_core::compute::Binding) -> Binding<D> {
+    fn compile_binding(&mut self, binding: cubecl_runtime::kernel::Binding) -> Binding<D> {
         Binding {
             id: binding.id,
             item: self.compile_type(binding.ty),

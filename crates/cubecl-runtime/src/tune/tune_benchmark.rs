@@ -1,19 +1,17 @@
+use super::{AutotuneError, TuneFn};
+use crate::{client::ComputeClient, runtime::Runtime};
 use alloc::format;
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use cubecl_common::profile::{ProfileDuration, TimingMethod};
 
-use crate::client::ComputeClient;
-use crate::server::ComputeServer;
-
-use super::{AutotuneError, TuneFn};
-
 /// A benchmark that runs on server handles
 #[derive(new)]
-pub struct TuneBenchmark<S: ComputeServer, In: Clone + Send + 'static, Out: Send + 'static> {
+pub struct TuneBenchmark<R: Runtime, In: Clone + Send + 'static, Out: Send + 'static> {
     operation: Arc<dyn TuneFn<Inputs = In, Output = Out>>,
     inputs: In,
-    client: ComputeClient<S>,
+    client: ComputeClient<R>,
 }
 
 /// The trait to be implemented by an autotune output.
@@ -31,9 +29,7 @@ impl AutotuneOutput for () {
     }
 }
 
-impl<S: ComputeServer + 'static, In: Clone + Send + 'static, Out: AutotuneOutput>
-    TuneBenchmark<S, In, Out>
-{
+impl<R: Runtime, In: Clone + Send + 'static, Out: AutotuneOutput> TuneBenchmark<R, In, Out> {
     /// Benchmark how long this operation takes for a number of samples.
     ///
     /// Returns at least one duration, otherwise an error is returned.
@@ -76,7 +72,9 @@ impl<S: ComputeServer + 'static, In: Clone + Send + 'static, Out: AutotuneOutput
             .collect();
 
         if durations.is_empty() {
-            Err(AutotuneError::InvalidSamples)
+            Err(AutotuneError::InvalidSamples {
+                name: operation.name().to_string(),
+            })
         } else {
             Ok(durations)
         }
@@ -95,7 +93,10 @@ impl<S: ComputeServer + 'static, In: Clone + Send + 'static, Out: AutotuneOutput
         );
 
         if let Err(err) = result {
-            return Err(AutotuneError::Unknown(format!("{err:?}")));
+            return Err(AutotuneError::Unknown {
+                name: self.operation.name().to_string(),
+                err: format!("{err:?}"),
+            });
         };
 
         if let Some(err) = error {

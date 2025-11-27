@@ -23,26 +23,25 @@ impl<GA: GlobalAttentionFamily> BatchAttentionFamily for SimpleBatchAttentionFam
     type Config = SimpleBatchConfig<GA::Config>;
 
     fn setup<R: cubecl_core::Runtime>(
-        client: &ComputeClient<R::Server>,
+        client: &ComputeClient<R>,
         problem: &AttentionProblem,
         selection: &AttentionSelection,
         line_sizes: &AttentionLineSizes,
         dtypes: &AttentionElems,
     ) -> Result<Self::Config, crate::components::AttentionSetupError> {
-        let global_config = GA::setup::<R>(client, problem, selection, line_sizes, dtypes)?;
+        let global_config = GA::setup(client, problem, selection, line_sizes, dtypes)?;
 
         SimpleBatchConfig::new(
             global_config,
             selection
                 .hypercube_selection
                 .to_hypercube_config(problem, client.properties().hardware.max_cube_count.clone()),
-            problem.seq_kv as u32,
         )
         .validate(problem)
     }
 
     unsafe fn launch_unchecked<'a, AA: AttentionArgs, R: cubecl_core::Runtime>(
-        client: &cubecl_core::prelude::ComputeClient<<R as cubecl_core::Runtime>::Server>,
+        client: &cubecl_core::prelude::ComputeClient<R>,
         cube_dim: cubecl_core::CubeDim,
         cube_count: cubecl_core::CubeCount,
         input: InputRuntimeArg<'a, AA, R>,

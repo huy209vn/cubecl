@@ -2714,171 +2714,185 @@ rustimpl<R: Runtime> BatchedSparseTensor<R> {
         }
     }
 }
+⭐ Section 14 — CubeCL-Sparse Scalar & Precision Rules (Rewritten)
 
-14. DType & Precision Rules
-Explicit dtype support matrix for sparse formats and operations.
-14.1 Format-DType Compatibility
-Format DType Support:
-┌─────────┬───────┬───────┬───────┬───────┬───────┬───────┐
-│ Format  │ f32   │ f16   │ bf16  │ f8    │ i32   │ i8    │
-├─────────┼───────┼───────┼───────┼───────┼───────┼───────┤
-│ CSR     │ ✓     │ ✓     │ ✓     │ ✓     │ ✓     │ ✓     │
-│ CSC     │ ✓     │ ✓     │ ✓     │ ✓     │ ✓     │ ✓     │
-│ COO     │ ✓     │ ✓     │ ✓     │ ✓     │ ✓     │ ✓     │
-│ N:M     │ ○     │ ✓TC   │ ✓TC   │ ✓TC*  │ ✗     │ ✗     │
-│ BSR     │ ✓     │ ✓TC   │ ✓TC   │ ○     │ ✓     │ ○     │
-└─────────┴───────┴───────┴───────┴───────┴───────┴───────┘
+Below is the rewritten version, in your tone but structured like a real spec.
+Use this in your repo.
+
+14. Scalar & Precision Rules
+
+Sparse formats support different scalar storage types (float, int, quantized).
+CubeCL does not expose a unified DType enum, so sparse uses:
+
+StorageType — the canonical scalar representation
+
+FloatKind — float layout metadata
+
+primitive integers (i8, i32) — stored as StorageType variants
+
+QuantValue — quantization scheme descriptor
+
+Each sparse format defines which scalar types it supports.
+
+14.1 Format–Scalar Compatibility
+
+For each sparse format, we specify which scalar types (by StorageType) are supported.
+
+(Conceptual table, same as before but rewritten to match CubeCL types)
+
+Format	f32	f16	bf16	fp8 (E4M3/E5M2)	i32	i8
+CSR	✓	✓	✓	✓	✓	✓
+CSC	✓	✓	✓	✓	✓	✓
+COO	✓	✓	✓	✓	✓	✓
+N:M	○	✓TC	✓TC	✓TC*	✗	✗
+BSR	✓	✓TC	✓TC	○	✓	○
 
 Legend:
-  ✓    = full support
-  ✓TC  = tensor core accelerated
-  ✓TC* = tensor core on Hopper+ only (fp8)
-  ○    = supported but not optimal
-  ✗    = not supported
-14.2 Index DTypes
-rust/// Index element types
-pub enum IndexDType {
-    /// 32-bit indices (default, supports up to 4B elements)
-    U32,
-    /// 16-bit indices (for smaller tensors, saves memory)
-    U16,
-    /// 64-bit indices (for very large tensors)
-    U64,
-}
 
-impl IndexDType {
-    /// Select based on dimension size
-    pub fn for_dimension(dim: usize) -> Self {
-        match dim {
-            d if d <= u16::MAX as usize => IndexDType::U16,
-            d if d <= u32::MAX as usize => IndexDType::U32,
-            _ => IndexDType::U64,
-        }
-    }
-    
-    /// Bytes per index element
-    pub fn bytes(&self) -> usize {
-        match self {
-            IndexDType::U16 => 2,
-            IndexDType::U32 => 4,
-            IndexDType::U64 => 8,
-        }
-    }
-}
-14.3 Mixed Precision SpMM
-rust/// Mixed precision configuration for SpMM
-#[derive(Clone, Debug)]
+✓ fully supported
+
+✓TC accelerated by tensor cores
+
+✓TC* tensor core on Hopper+ only
+
+○ supported but not optimal
+
+✗ not supported
+
+Implementation notes:
+
+This becomes a function:
+
+fn is_scalar_supported(format: SparseFormatId, ty: StorageType) -> SupportLevel
+
+
+Where SupportLevel is your own tiny enum:
+
+enum SupportLevel { Full, TensorCore, Suboptimal, Unsupported }
+
+
+StorageType tells you “this is f32 / f16 / bf16 / e4m3 / i8 / i32 / …”.
+
+Tensor-core logic requires checking the backend’s FloatKind.
+
+14.2 Index Scalar Types (IndexDType)
+
+Exactly as originally written — this part stays 100% unchanged, because index arrays are not CubeCL scalars.
+
+Your rewritten spec:
+
+Index arrays are your own small enum IndexDType:
+
+U16
+
+U32
+
+U64
+
+Used only for indexing structures (row_ptr, col_idx, etc.)
+
+No relationship to CubeCL’s StorageType.
+
+This stays exactly the same.
+
+14.3 Mixed Precision SpMM (using StorageType)
+
+Rewrite mixed precision configs to use StorageType instead of DType.
+
+New structure:
 pub struct MixedPrecisionConfig {
-    /// Input A dtype
-    pub input_a: DType,
-    /// Input B dtype  
-    pub input_b: DType,
-    /// Accumulation dtype (usually higher precision)
-    pub accumulate: DType,
-    /// Output dtype
-    pub output: DType,
+    pub a: StorageType,
+    pub b: StorageType,
+    pub accum: StorageType,
+    pub out: StorageType,
 }
 
-impl MixedPrecisionConfig {
-    /// Standard fp16 with fp32 accumulation
-    pub const FP16_FP32_ACC: Self = Self {
-        input_a: DType::F16,
-        input_b: DType::F16,
-        accumulate: DType::F32,
-        output: DType::F16,
-    };
-    
-    /// BF16 with fp32 accumulation (recommended for training)
-    pub const BF16_FP32_ACC: Self = Self {
-        input_a: DType::BF16,
-        input_b: DType::BF16,
-        accumulate: DType::F32,
-        output: DType::BF16,
-    };
-    
-    /// TF32 (Ampere+)
-    pub const TF32: Self = Self {
-        input_a: DType::TF32,
-        input_b: DType::TF32,
-        accumulate: DType::F32,
-        output: DType::F32,
-    };
+Predefined configs (conceptually):
+
+FP16 input, FP32 accumulate
+
+MixedPrecisionConfig {
+    a: StorageType::F16,
+    b: StorageType::F16,
+    accum: StorageType::F32,
+    out: StorageType::F16,
 }
 
-/// Kernel selection based on dtype
-pub fn select_spmm_kernel<R: Runtime>(
-    format: SparseFormatId,
-    precision: &MixedPrecisionConfig,
-    device: &R::Device,
-) -> Box<dyn SparseOperation<R>> {
-    match (format, precision, device.compute_capability()) {
-        // 2:4 + fp16/bf16 + Ampere+ → tensor core kernel
-        (SparseFormatId::NM { n: 2, m: 4 }, cfg, cc) 
-            if (cfg.input_a == DType::F16 || cfg.input_a == DType::BF16) 
-               && cc >= ComputeCapability::SM_80 
-        => {
-            Box::new(NMSpmmTensorCore::new(precision.clone()))
-        }
-        
-        // BSR + fp16 + Ampere+ → block tensor core kernel
-        (SparseFormatId::Bsr { .. }, cfg, cc)
-            if cfg.input_a == DType::F16 && cc >= ComputeCapability::SM_80
-        => {
-            Box::new(BsrSpmmTensorCore::new(precision.clone()))
-        }
-        
-        // Default: CSR with appropriate dtype
-        (SparseFormatId::Csr, cfg, _) => {
-            Box::new(CsrSpmm::new(cfg.clone()))
-        }
-        
-        _ => panic!("Unsupported format/dtype combination"),
-    }
-}
-14.4 Quantization Support
-rust/// Sparse tensor quantization
-pub struct SparseQuantization;
 
-impl SparseQuantization {
-    /// Quantize sparse tensor to int8
-    pub fn quantize_int8<R: Runtime>(
-        tensor: SparseTensor<R>,
-        scale: f32,
-        zero_point: i8,
-        client: &ComputeClient<...>,
-    ) -> (SparseTensor<R>, QuantizationParams) {
-        // Only quantize values buffer, indices unchanged
-        let quantized_values = quantize_buffer(
-            tensor.values_buffer(),
-            scale,
-            zero_point,
-            client,
-        );
-        
-        (
-            tensor.with_values(quantized_values, DType::I8),
-            QuantizationParams { scale, zero_point },
-        )
-    }
-    
-    /// Dequantize back to float
-    pub fn dequantize<R: Runtime>(
-        tensor: SparseTensor<R>,
-        params: &QuantizationParams,
-        target_dtype: DType,
-        client: &ComputeClient<...>,
-    ) -> SparseTensor<R> {
-        let dequantized_values = dequantize_buffer(
-            tensor.values_buffer(),
-            params,
-            target_dtype,
-            client,
-        );
-        
-        tensor.with_values(dequantized_values, target_dtype)
-    }
+BF16 input, FP32 accumulate
+
+MixedPrecisionConfig {
+    a: StorageType::BF16,
+    b: StorageType::BF16,
+    accum: StorageType::F32,
+    out: StorageType::BF16,
 }
 
+
+TF32
+
+MixedPrecisionConfig {
+    a: StorageType::TF32,
+    b: StorageType::TF32,
+    accum: StorageType::F32,
+    out: StorageType::F32,
+}
+
+Kernel selection
+
+rewritten using StorageType + FloatKind:
+
+match (format, precision.a, device.compute_capability()) {
+    (SparseFormatId::NM { n: 2, m: 4 }, StorageType::F16 | StorageType::BF16, cc)
+        if cc >= SM_80 => TensorCoreNM,
+
+    (SparseFormatId::Bsr { .. }, StorageType::F16, cc)
+        if cc >= SM_80 => TensorCoreBSR,
+
+    (SparseFormatId::Csr, _, _) => DefaultCSR,
+
+    _ => Unsupported,
+}
+
+
+No reference to a “DType enum” anymore — only StorageType.
+
+14.4 Quantization Support (StorageType + QuantValue)
+
+Rewrite quantization rules:
+
+Conceptual API:
+pub struct QuantizationParams {
+    pub scale: f32,
+    pub zero: i8,
+}
+
+Quantization:
+
+Quantize values buffer to i8 storage.
+
+Set metadata’s dtype() to StorageType::I8.
+
+Set quantization scheme to the appropriate QuantValue.
+
+Conceptually:
+
+let new_values = cubecl::quant::quantize_to_i8(values, scale, zero, client);
+
+tensor.with_values(new_values)
+      .with_dtype(StorageType::I8)
+      .with_quant(Some(QuantValue::Q8F))
+
+Dequantization:
+let new_values = cubecl::quant::dequantize(values, params, target_storage_type);
+
+tensor.with_values(new_values)
+      .with_dtype(target_storage_type)
+      .with_quant(None)
+
+
+Note:
+CubeCL does the heavy lifting for quantize/dequantize — you’re only wrapping it for sparse.
 15. Shape Semantics
 Clear distinction between logical shape and storage shape.
 15.1 Shape Types
@@ -4983,7 +4997,7 @@ cubecl-sparse/src/
 │   ├── tensor.rs                 # BatchedSparseTensor
 │   └── spmm.rs                   # BatchedCsrSpmm
 │
-├── dtype/                        # DType handling (Section 14)
+├── scalar/                        #  DType (StorageType) handling (Section 14)
 │   ├── mod.rs
 │   ├── compat.rs                 # Compatibility matrix
 │   ├── mixed_precision.rs        # MixedPrecisionConfig

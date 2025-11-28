@@ -1,3 +1,9 @@
+use cubecl_runtime::client::ComputeClient;
+use cubecl_core::prelude::Tensor;
+use cubecl_runtime::runtime::Runtime;
+
+use cubecl_core::prelude::CubeType;
+use cubecl_core::ir::StorageType;
 pub trait SparseFormat: Send + Sync + 'static {
     /// Format identifier for dispatch
     const FORMAT_ID: SparseFormatId;
@@ -23,7 +29,7 @@ pub enum SparseFormatId {
 }
 
 /// Core sparse tensor storage trait
-pub trait SparseStorage<R: Runtime>: SparseFormat {
+pub trait SparseStorage<R: Runtime + CubeType>: SparseFormat {
     /// Metadata type (shape, nnz, block info, etc.)
     type Metadata: SparseMetadata;
     
@@ -34,13 +40,13 @@ pub trait SparseStorage<R: Runtime>: SparseFormat {
     fn from_dense(
         dense: &Tensor<R>,
         threshold: f32,
-        client: &ComputeClient<R::Server, R::Channel>,
+        client: &ComputeClient<R>,
     ) -> Self;
     
     /// Convert to dense tensor
     fn to_dense(
         &self,
-        client: &ComputeClient<R::Server, R::Channel>,
+        client: &ComputeClient<R>,
     ) -> Tensor<R>;
     
     /// Get metadata (cheap, no GPU sync)
@@ -57,5 +63,5 @@ pub trait SparseStorage<R: Runtime>: SparseFormat {
 pub trait SparseMetadata: Clone + Send + Sync {
     fn shape(&self) -> &[usize];
     fn nnz(&self) -> usize;
-    fn dtype(&self) -> DType;
+    fn dtype(&self) -> StorageType;
 }

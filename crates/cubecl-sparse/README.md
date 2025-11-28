@@ -1736,7 +1736,10 @@ cubecl-sparse/                    # New crate in cubecl workspace
 │   │   │   ├── nm_emulated.rs    # Fallback kernel
 │   │   │   └── bsr_spmm.rs       # Block SpMM
 │   │   │
-│   │   ├── spmv.rs               # Sparse × Dense vector
+│   │   ├── spmv.rs # Sparse × Dense vector
+            SDDMM.rs
+            SpGEMM
+
 │   │   ├── elementwise.rs        # Sparse element-wise ops
 │   │   ├── reduction.rs          # Sparse reductions (sum, mean, norm)
 │   │   └── transpose.rs          # Sparse transpose ops
@@ -5044,3 +5047,1730 @@ burn-sparse/src/
     ├── linear.rs                 # SparseLinear
     ├── embedding.rs              # SparseEmbedding
     └── attention.rs              # Sparse attention (future)
+
+
+
+    CubeCL-Sparse: Architecture Specification — Part 3
+Version: 0.1.0-draft
+Continuation of: Parts 1 & 2
+Focus: Extended Operations, Optimizers, Concurrency, Autotuning
+
+Table of Contents
+
+SpGEMM (Sparse × Sparse)
+Sparse Optimizers
+Thread Safety & Concurrency
+Autotuning System
+Mask Scheduling
+Sparsity Regularization
+Sparse Attention Interface
+Updated Roadmap Additions
+
+
+27. SpGEMM (Sparse × Sparse)
+Sparse-sparse matrix multiplication. Output pattern is unknown beforehand.
+27.1 Problem Statement
+SpGEMM: A_sparse(M×K) × B_sparse(K×N) = C_sparse(M×N)
+
+Key challenge: C's sparsity pattern is not known until computation.
+- Must compute pattern first (symbolic phase)
+- Then compute values (numeric phase)
+- Or: compute both in merged pass with dynamic allocation
+
+Use cases:
+- GNN adjacency × feature propagation
+- Sparse attention: (Q @ K^T) where both are sparse
+- Pattern union/intersection for dynamic sparsity
+- Gradient computation for SpGEMM backward
+27.2 Algorithm Options
+┌─────────────────────────────────────────────────────────────────┐
+│ Algorithm        │ Pros                  │ Cons                 │
+├──────────────────┼───────────────────────┼──────────────────────┤
+│ Row-by-row       │ Simple, low memory    │ Slow for large K     │
+│ (Gustavson)      │                       │                      │
+├──────────────────┼───────────────────────┼──────────────────────┤
+│ Outer product    │ Parallelizable        │ High intermediate    │
+│                  │                       │ memory               │
+├──────────────────┼───────────────────────┼──────────────────────┤
+│ Hash-based       │ Good for irregular    │ Hash collisions      │
+│                  │                       │                      │
+├──────────────────┼───────────────────────┼──────────────────────┤
+│ Heap-based merge │ Sorted output         │ Sequential           │
+│                  │                       │                      │
+├──────────────────┼───────────────────────┼──────────────────────┤
+│ Two-phase        │ Predictable memory    │ Two kernel launches  │
+│ (symbolic+num)   │                       │                      │
+└─────────────────────────────────────────────────────────────────┘
+
+Recommended: Two-phase for predictability, hash-based for irregular patterns.
+27.3 Two-Phase SpGEMM
+rust/// SpGEMM operation (CSR × CSR → CSR)
+pub struct CsrSpgemm<R: Runtime> {
+    /// Algorithm variant
+    pub algorithm: SpgemmAlgorithm,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SpgemmAlgorithm {
+    /// Two-phase: symbolic then numeric
+    TwoPhase,
+    /// Hash-based with dynamic allocation
+    HashBased,
+    /// Use cuSPARSE as fallback
+    External,
+}
+
+impl<R: Runtime> CsrSpgemm<R> {
+    /// Execute SpGEMM
+    pub fn execute(
+        &self,
+        a: &CsrStorage<R>,
+        b: &CsrStorage<R>,
+        client: &ComputeClient<...>,
+    ) -> CsrStorage<R> {
+        match self.algorithm {
+            SpgemmAlgorithm::TwoPhase => {
+                // Phase 1: Compute output structure
+                let c_pattern = self.symbolic_phase(a, b, client);
+                // Phase 2: Compute values
+                self.numeric_phase(a, b, &c_pattern, client)
+            }
+            SpgemmAlgorithm::HashBased => {
+                self.hash_spgemm(a, b, client)
+            }
+            SpgemmAlgorithm::External => {
+                // Fallback to cuSPARSE
+                external_spgemm(a, b, client)
+            }
+        }
+    }
+    
+    /// Phase 1: Compute output row pointers (pattern only)
+    fn symbolic_phase(
+        &self,
+        a: &CsrStorage<R>,
+        b: &CsrStorage<R>,
+        client: &ComputeClient<...>,
+    ) -> SpgemmPattern {
+        // For each row i of A:
+        //   For each non-zero (i, k) in A:
+        //     Union columns of B[k, :] into output row i
+        // 
+        // Output: row_ptrs for C, total nnz
+        
+        // Kernel computes nnz per row of C
+        let nnz_per_row = compute_nnz_per_row(a, b, client);
+        
+        // Prefix sum for row_ptrs
+        let row_ptrs = prefix_sum(&nnz_per_row, client);
+        let total_nnz = row_ptrs.last();
+        
+        SpgemmPattern { row_ptrs, total_nnz }
+    }
+    
+    /// Phase 2: Compute values given known pattern
+    fn numeric_phase(
+        &self,
+        a: &CsrStorage<R>,
+        b: &CsrStorage<R>,
+        pattern: &SpgemmPattern,
+        client: &ComputeClient<...>,
+    ) -> CsrStorage<R> {
+        // Allocate output buffers
+        let col_indices = allocate_buffer(pattern.total_nnz, client);
+        let values = allocate_buffer(pattern.total_nnz, client);
+        
+        // Compute values with known output positions
+        spgemm_numeric_kernel(
+            a, b, 
+            &pattern.row_ptrs,
+            &mut col_indices,
+            &mut values,
+            client,
+        );
+        
+        CsrStorage {
+            row_ptrs: pattern.row_ptrs.clone(),
+            col_indices,
+            values,
+            meta: CsrMetadata { 
+                rows: a.meta.rows,
+                cols: b.meta.cols,
+                nnz: pattern.total_nnz,
+                ..
+            },
+        }
+    }
+}
+
+struct SpgemmPattern {
+    row_ptrs: Handle<...>,
+    total_nnz: usize,
+}
+27.4 Symbolic Phase Kernel
+rust/// Compute nnz per row of C = A × B
+#[cube(launch)]
+pub fn spgemm_symbolic_kernel(
+    // A in CSR
+    a_row_ptrs: &Array<u32>,
+    a_col_indices: &Array<u32>,
+    // B in CSR
+    b_row_ptrs: &Array<u32>,
+    b_col_indices: &Array<u32>,
+    // Output: nnz count per row of C
+    c_nnz_per_row: &mut Array<u32>,
+    // Workspace: hash table per row (shared memory)
+    #[comptime] m: u32,
+    #[comptime] k: u32,
+    #[comptime] n: u32,
+    #[comptime] hash_size: u32,  // Power of 2, e.g., 1024
+) {
+    let row = ABSOLUTE_POS_X as u32;
+    
+    if row >= m {
+        return;
+    }
+    
+    // Per-row hash table in shared memory
+    let mut hash_table = SharedMemory::<u32>::new(hash_size);
+    
+    // Initialize hash table
+    for i in 0..hash_size {
+        hash_table[i] = u32::MAX;  // Empty marker
+    }
+    
+    sync_units();
+    
+    let a_start = a_row_ptrs[row];
+    let a_end = a_row_ptrs[row + 1];
+    
+    let mut count = 0u32;
+    
+    // For each non-zero in row of A
+    for a_idx in a_start..a_end {
+        let k_idx = a_col_indices[a_idx];
+        
+        // Union columns from B[k_idx, :]
+        let b_start = b_row_ptrs[k_idx];
+        let b_end = b_row_ptrs[k_idx + 1];
+        
+        for b_idx in b_start..b_end {
+            let j = b_col_indices[b_idx];
+            
+            // Insert j into hash table
+            let hash = j & (hash_size - 1);  // Modulo for power of 2
+            let mut slot = hash;
+            
+            loop {
+                let existing = atomicCAS(&hash_table[slot], u32::MAX, j);
+                
+                if existing == u32::MAX {
+                    // Inserted new element
+                    count += 1;
+                    break;
+                } else if existing == j {
+                    // Already present
+                    break;
+                } else {
+                    // Collision, linear probe
+                    slot = (slot + 1) & (hash_size - 1);
+                }
+            }
+        }
+    }
+    
+    c_nnz_per_row[row] = count;
+}
+27.5 SpGEMM Autodiff
+Forward:  C = A × B  (all sparse)
+
+Backward:
+  dL/dA = dL/dC × Bᵀ      (SpGEMM: sparse × sparse)
+  dL/dB = Aᵀ × dL/dC      (SpGEMM: sparse × sparse)
+
+Pattern considerations:
+  - dL/dC has same pattern as C
+  - dL/dA pattern ⊆ A pattern (may be sparser due to zeros)
+  - dL/dB pattern ⊆ B pattern
+
+For training: usually want gradients restricted to input patterns.
+rust/// SpGEMM backward
+pub struct SpgemmBackward<R: Runtime>;
+
+impl<R: Runtime> SpgemmBackward<R> {
+    /// Compute dL/dA (sparse, same pattern as A)
+    pub fn grad_a(
+        grad_c: &CsrStorage<R>,
+        b: &CsrStorage<R>,
+        a_pattern: &SparsityPattern<R>,
+        client: &ComputeClient<...>,
+    ) -> CsrStorage<R> {
+        // dL/dA = dL/dC × Bᵀ, masked to A's pattern
+        let b_transposed = b.transpose_to_csc(client);
+        let full_grad = CsrSpgemm::execute(grad_c, &b_transposed.to_csr(), client);
+        
+        // Mask to A's pattern (keep only positions where A is non-zero)
+        mask_to_pattern(&full_grad, a_pattern, client)
+    }
+    
+    /// Compute dL/dB (sparse, same pattern as B)
+    pub fn grad_b(
+        a: &CsrStorage<R>,
+        grad_c: &CsrStorage<R>,
+        b_pattern: &SparsityPattern<R>,
+        client: &ComputeClient<...>,
+    ) -> CsrStorage<R> {
+        // dL/dB = Aᵀ × dL/dC, masked to B's pattern
+        let a_transposed = a.transpose_to_csc(client);
+        let full_grad = CsrSpgemm::execute(&a_transposed.to_csr(), grad_c, client);
+        
+        // Mask to B's pattern
+        mask_to_pattern(&full_grad, b_pattern, client)
+    }
+}
+27.6 Pattern Operations
+rust/// Sparse pattern set operations (useful for dynamic sparsity)
+pub struct PatternOps;
+
+impl PatternOps {
+    /// Union of two patterns: positions where either A or B is non-zero
+    pub fn union<R: Runtime>(
+        a: &SparsityPattern<R>,
+        b: &SparsityPattern<R>,
+        client: &ComputeClient<...>,
+    ) -> SparsityPattern<R> {
+        // Convert both to COO, merge, sort, coalesce
+        let a_coo = a.to_coo(client);
+        let b_coo = b.to_coo(client);
+        let merged = coo_merge(&a_coo, &b_coo, client);
+        merged.sort(client);
+        merged.coalesce(client);  // Remove duplicates
+        SparsityPattern::from_coo(merged, client)
+    }
+    
+    /// Intersection of two patterns: positions where both A and B are non-zero
+    pub fn intersection<R: Runtime>(
+        a: &SparsityPattern<R>,
+        b: &SparsityPattern<R>,
+        client: &ComputeClient<...>,
+    ) -> SparsityPattern<R> {
+        // More complex: need to find matching (row, col) pairs
+        pattern_intersection_kernel(a, b, client)
+    }
+    
+    /// Difference: positions in A but not in B
+    pub fn difference<R: Runtime>(
+        a: &SparsityPattern<R>,
+        b: &SparsityPattern<R>,
+        client: &ComputeClient<...>,
+    ) -> SparsityPattern<R> {
+        pattern_difference_kernel(a, b, client)
+    }
+    
+    /// Symmetric difference: positions in A xor B
+    pub fn symmetric_difference<R: Runtime>(
+        a: &SparsityPattern<R>,
+        b: &SparsityPattern<R>,
+        client: &ComputeClient<...>,
+    ) -> SparsityPattern<R> {
+        let union = Self::union(a, b, client);
+        let intersection = Self::intersection(a, b, client);
+        Self::difference(&union, &intersection, client)
+    }
+}
+
+28. Sparse Optimizers
+Optimizers that handle sparse parameters efficiently.
+28.1 Design Considerations
+Key questions:
+1. Are momentum/velocity buffers sparse or dense?
+   - Sparse: memory efficient, but pattern must match
+   - Dense: simpler, but defeats memory savings
+
+2. How to handle pattern changes (dynamic sparsity)?
+   - Reinitialize buffers on pattern change
+   - Or: track dense buffers, apply mask at update
+
+3. Weight decay / L2 regularization?
+   - Apply to non-zero weights only
+   - Or: apply to all (affects regrowth candidates)
+
+Recommended: 
+  - Static sparsity: sparse buffers matching parameter pattern
+  - Dynamic sparsity: dense buffers with lazy sparsification
+28.2 Sparse SGD
+rust/// Sparse SGD optimizer state
+pub struct SparseSgdState<R: Runtime> {
+    /// Momentum buffer (same pattern as parameter)
+    momentum: Option<CsrStorage<R>>,
+}
+
+/// Sparse SGD optimizer
+pub struct SparseSgd<R: Runtime> {
+    /// Learning rate
+    pub lr: f32,
+    /// Momentum coefficient
+    pub momentum: f32,
+    /// Weight decay (L2 regularization)
+    pub weight_decay: f32,
+    /// Dampening for momentum
+    pub dampening: f32,
+    /// Nesterov momentum
+    pub nesterov: bool,
+}
+
+impl<R: Runtime> SparseSgd<R> {
+    /// Update sparse parameter
+    pub fn step(
+        &self,
+        param: &mut SparseParameter<R>,
+        grad: &CsrStorage<R>,
+        state: &mut SparseSgdState<R>,
+        client: &ComputeClient<...>,
+    ) -> Result<(), SparseError> {
+        // Validate pattern match
+        if param.storage.meta.nnz != grad.meta.nnz {
+            return Err(SparseError::PatternMismatch { 
+                expected_nnz: param.storage.meta.nnz,
+                got_nnz: grad.meta.nnz,
+            });
+        }
+        
+        // Apply weight decay: grad = grad + weight_decay * param
+        let grad = if self.weight_decay != 0.0 {
+            sparse_axpy(self.weight_decay, &param.storage, grad, client)
+        } else {
+            grad.clone()
+        };
+        
+        // Update momentum buffer
+        if self.momentum != 0.0 {
+            let momentum_buf = state.momentum.get_or_insert_with(|| {
+                // Initialize with zeros (same pattern as grad)
+                zeros_like_sparse(&grad, client)
+            });
+            
+            // buf = momentum * buf + (1 - dampening) * grad
+            sparse_momentum_update(
+                momentum_buf,
+                &grad,
+                self.momentum,
+                self.dampening,
+                client,
+            );
+            
+            // Use momentum buffer for update
+            let update = if self.nesterov {
+                // Nesterov: grad + momentum * buf
+                sparse_axpy(self.momentum, momentum_buf, &grad, client)
+            } else {
+                momentum_buf.clone()
+            };
+            
+            // param = param - lr * update
+            sparse_axpy_inplace(-self.lr, &update, &mut param.storage, client);
+        } else {
+            // No momentum: param = param - lr * grad
+            sparse_axpy_inplace(-self.lr, &grad, &mut param.storage, client);
+        }
+        
+        Ok(())
+    }
+}
+
+/// Sparse axpy: y = alpha * x + y (element-wise, same pattern)
+#[cube(launch)]
+pub fn sparse_axpy_kernel<F: Float>(
+    alpha: F,
+    x_values: &Array<F>,
+    y_values: &mut Array<F>,
+    #[comptime] nnz: u32,
+) {
+    let idx = ABSOLUTE_POS_X as u32;
+    if idx >= nnz {
+        return;
+    }
+    y_values[idx] = alpha * x_values[idx] + y_values[idx];
+}
+28.3 Sparse Adam
+rust/// Sparse Adam optimizer state
+pub struct SparseAdamState<R: Runtime> {
+    /// First moment (mean of gradients)
+    m: CsrStorage<R>,
+    /// Second moment (mean of squared gradients)
+    v: CsrStorage<R>,
+    /// Step count
+    step: usize,
+}
+
+/// Sparse Adam optimizer
+pub struct SparseAdam<R: Runtime> {
+    pub lr: f32,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub eps: f32,
+    pub weight_decay: f32,
+    /// AMSGrad variant
+    pub amsgrad: bool,
+    /// Max second moment (for AMSGrad)
+    v_max: Option<CsrStorage<R>>,
+}
+
+impl<R: Runtime> SparseAdam<R> {
+    /// Update sparse parameter
+    pub fn step(
+        &self,
+        param: &mut SparseParameter<R>,
+        grad: &CsrStorage<R>,
+        state: &mut SparseAdamState<R>,
+        client: &ComputeClient<...>,
+    ) -> Result<(), SparseError> {
+        state.step += 1;
+        
+        // Apply weight decay (AdamW style: decoupled)
+        if self.weight_decay != 0.0 {
+            sparse_axpy_inplace(
+                -self.lr * self.weight_decay,
+                &param.storage,
+                &mut param.storage,
+                client,
+            );
+        }
+        
+        // Update biased first moment: m = beta1 * m + (1 - beta1) * grad
+        sparse_ema_update(&mut state.m, grad, self.beta1, client);
+        
+        // Update biased second moment: v = beta2 * v + (1 - beta2) * grad^2
+        sparse_ema_squared_update(&mut state.v, grad, self.beta2, client);
+        
+        // Bias correction
+        let bias_correction1 = 1.0 - self.beta1.powi(state.step as i32);
+        let bias_correction2 = 1.0 - self.beta2.powi(state.step as i32);
+        
+        // AMSGrad: use max of v
+        let v_effective = if self.amsgrad {
+            let v_max = self.v_max.get_or_insert_with(|| state.v.clone());
+            sparse_max_inplace(v_max, &state.v, client);
+            v_max
+        } else {
+            &state.v
+        };
+        
+        // param = param - lr * m_hat / (sqrt(v_hat) + eps)
+        // m_hat = m / bias_correction1
+        // v_hat = v / bias_correction2
+        sparse_adam_update(
+            &mut param.storage,
+            &state.m,
+            v_effective,
+            self.lr,
+            bias_correction1,
+            bias_correction2,
+            self.eps,
+            client,
+        );
+        
+        Ok(())
+    }
+}
+
+/// Adam update kernel: param -= lr * m_hat / (sqrt(v_hat) + eps)
+#[cube(launch)]
+pub fn sparse_adam_update_kernel<F: Float>(
+    param_values: &mut Array<F>,
+    m_values: &Array<F>,
+    v_values: &Array<F>,
+    lr: F,
+    bias_correction1: F,
+    bias_correction2: F,
+    eps: F,
+    #[comptime] nnz: u32,
+) {
+    let idx = ABSOLUTE_POS_X as u32;
+    if idx >= nnz {
+        return;
+    }
+    
+    let m_hat = m_values[idx] / bias_correction1;
+    let v_hat = v_values[idx] / bias_correction2;
+    
+    let update = lr * m_hat / (sqrt(v_hat) + eps);
+    param_values[idx] = param_values[idx] - update;
+}
+28.4 Dynamic Sparsity Optimizer
+rust/// Optimizer state that handles pattern changes
+pub struct DynamicSparseAdamState<R: Runtime> {
+    /// Dense first moment (for pattern flexibility)
+    m_dense: Tensor<R>,
+    /// Dense second moment
+    v_dense: Tensor<R>,
+    /// Step count
+    step: usize,
+    /// Current pattern (for masking)
+    pattern: SparsityPattern<R>,
+}
+
+impl<R: Runtime> DynamicSparseAdamState<R> {
+    /// Handle pattern change
+    pub fn on_pattern_change(
+        &mut self,
+        new_pattern: SparsityPattern<R>,
+        client: &ComputeClient<...>,
+    ) {
+        // Dense buffers don't need reallocation
+        // Just update pattern reference
+        self.pattern = new_pattern;
+        
+        // Optionally: zero out momentum for removed positions
+        // (or keep for potential regrowth)
+    }
+    
+    /// Extract sparse gradient from dense moment
+    pub fn get_sparse_moment(&self, client: &ComputeClient<...>) -> CsrStorage<R> {
+        extract_at_pattern(&self.m_dense, &self.pattern, client)
+    }
+}
+
+/// Optimizer wrapper that handles both static and dynamic modes
+pub enum SparseOptimizerState<R: Runtime> {
+    Static(SparseAdamState<R>),
+    Dynamic(DynamicSparseAdamState<R>),
+}
+28.5 Gradient Clipping
+rust/// Sparse gradient clipping utilities
+pub struct SparseGradientClipping;
+
+impl SparseGradientClipping {
+    /// Clip gradient by global norm
+    pub fn clip_by_norm<R: Runtime>(
+        grad: &mut CsrStorage<R>,
+        max_norm: f32,
+        client: &ComputeClient<...>,
+    ) {
+        let norm = sparse_norm(grad, client);
+        if norm > max_norm {
+            let scale = max_norm / norm;
+            sparse_scale_inplace(scale, grad, client);
+        }
+    }
+    
+    /// Clip gradient by value
+    pub fn clip_by_value<R: Runtime>(
+        grad: &mut CsrStorage<R>,
+        min_val: f32,
+        max_val: f32,
+        client: &ComputeClient<...>,
+    ) {
+        sparse_clamp_inplace(grad, min_val, max_val, client);
+    }
+    
+    /// Clip gradient norm across multiple sparse parameters
+    pub fn clip_global_norm<R: Runtime>(
+        grads: &mut [&mut CsrStorage<R>],
+        max_norm: f32,
+        client: &ComputeClient<...>,
+    ) {
+        // Compute global norm
+        let mut total_norm_sq = 0.0f32;
+        for grad in grads.iter() {
+            let norm = sparse_norm(grad, client);
+            total_norm_sq += norm * norm;
+        }
+        let total_norm = total_norm_sq.sqrt();
+        
+        // Scale all gradients if needed
+        if total_norm > max_norm {
+            let scale = max_norm / total_norm;
+            for grad in grads.iter_mut() {
+                sparse_scale_inplace(scale, grad, client);
+            }
+        }
+    }
+}
+
+29. Thread Safety & Concurrency
+29.1 Send + Sync Analysis
+rust/// Thread safety markers
+
+// SparseTensor: Send + Sync if R::Server and R::Channel are
+// Typically true for CUDA/WGPU runtimes
+unsafe impl<R: Runtime> Send for SparseTensor<R> 
+where 
+    R::Server: Send,
+    R::Channel: Send,
+{}
+
+unsafe impl<R: Runtime> Sync for SparseTensor<R>
+where
+    R::Server: Sync,
+    R::Channel: Sync,
+{}
+
+// SparseTensorHandle: Send + Sync (buffers are refcounted)
+unsafe impl<R: Runtime> Send for SparseTensorHandle<R> { }
+unsafe impl<R: Runtime> Sync for SparseTensorHandle<R> { }
+
+// SparseTensorHandleRef: NOT Send (lifetime-bound to handle)
+// Can be Sync for concurrent reads
+impl<'a, R: Runtime> !Send for SparseTensorHandleRef<'a, R> {}
+unsafe impl<'a, R: Runtime> Sync for SparseTensorHandleRef<'a, R> {}
+29.2 Concurrent Access Patterns
+rust/// Concurrent read access
+/// Multiple threads can read the same sparse tensor simultaneously
+
+// Safe: concurrent reads
+let tensor = Arc::new(sparse_tensor);
+let handles: Vec<_> = (0..num_threads)
+    .map(|_| {
+        let t = tensor.clone();
+        thread::spawn(move || {
+            let ref_ = t.handle_ref();  // Borrow for read
+            // Read operations...
+        })
+    })
+    .collect();
+
+/// Exclusive write access
+/// Writes require unique ownership
+
+// Pattern 1: Clone-on-write
+impl<R: Runtime> SparseTensor<R> {
+    pub fn mutate<F>(&mut self, f: F, client: &ComputeClient<...>)
+    where
+        F: FnOnce(&mut SparseTensorHandle<R>),
+    {
+        // Ensure unique ownership
+        let handle = Arc::make_mut(&mut self.handle);
+        f(handle);
+    }
+}
+
+// Pattern 2: Into-unique
+impl<R: Runtime> SparseTensor<R> {
+    pub fn into_unique(self, client: &ComputeClient<...>) -> Self {
+        if Arc::strong_count(&self.handle) == 1 {
+            self
+        } else {
+            Self {
+                handle: Arc::new(self.handle.clone_deep(client)),
+                ..self
+            }
+        }
+    }
+}
+29.3 Pattern Copy-on-Write
+rust/// Copy-on-write for sparsity patterns (shared across tensors with same structure)
+pub struct SharedPattern<R: Runtime> {
+    inner: Arc<SparsityPattern<R>>,
+}
+
+impl<R: Runtime> SharedPattern<R> {
+    /// Get immutable reference
+    pub fn get(&self) -> &SparsityPattern<R> {
+        &self.inner
+    }
+    
+    /// Get mutable reference (clones if shared)
+    pub fn get_mut(&mut self, client: &ComputeClient<...>) -> &mut SparsityPattern<R> {
+        Arc::make_mut(&mut self.inner)
+    }
+    
+    /// Check if this is the only reference
+    pub fn is_unique(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+}
+
+/// Tensors with same pattern can share index buffers
+pub struct PatternSharedTensor<R: Runtime> {
+    /// Shared pattern (indices)
+    pattern: SharedPattern<R>,
+    /// Unique values
+    values: Handle<R::Server>,
+    /// Metadata
+    meta: CsrMetadata,
+}
+29.4 Async Operations
+rust/// Async sparse operations for pipeline parallelism
+pub struct AsyncSparseOps<R: Runtime> {
+    client: ComputeClient<R::Server, R::Channel>,
+}
+
+impl<R: Runtime> AsyncSparseOps<R> {
+    /// Launch SpMM asynchronously, return future
+    pub fn spmm_async(
+        &self,
+        a: &SparseTensor<R>,
+        b: &Tensor<R>,
+    ) -> SparseFuture<Tensor<R>> {
+        // Launch kernel without synchronization
+        let output = launch_spmm_kernel(a, b, &self.client);
+        
+        SparseFuture {
+            output,
+            event: self.client.record_event(),
+        }
+    }
+    
+    /// Wait for async operation
+    pub fn wait<T>(&self, future: SparseFuture<T>) -> T {
+        self.client.wait_event(future.event);
+        future.output
+    }
+}
+
+pub struct SparseFuture<T> {
+    output: T,
+    event: Event,
+}
+
+impl<T> SparseFuture<T> {
+    /// Check if operation is complete (non-blocking)
+    pub fn is_ready(&self) -> bool {
+        self.event.is_complete()
+    }
+}
+
+30. Autotuning System
+30.1 Autotuner Architecture
+rust/// Autotuner for sparse kernels
+pub struct SparseAutotuner<R: Runtime> {
+    /// Database of timing results
+    database: AutotuneDatabase,
+    /// Whether autotuning is enabled
+    enabled: bool,
+    /// Number of warmup runs before timing
+    warmup_runs: usize,
+    /// Number of timed runs
+    timed_runs: usize,
+}
+
+/// Autotune database (persistent)
+pub struct AutotuneDatabase {
+    /// Results keyed by operation signature
+    results: HashMap<AutotuneKey, AutotuneResult>,
+    /// Path to persistent storage
+    path: Option<PathBuf>,
+}
+
+#[derive(Clone, Hash, Eq, PartialEq)]
+pub struct AutotuneKey {
+    /// Operation type
+    pub op: SparseOpType,
+    /// Format
+    pub format: SparseFormatId,
+    /// Shape bucket
+    pub shape: ShapeBucket,
+    /// Sparsity bucket
+    pub sparsity: SparsityBucket,
+    /// Row distribution bucket
+    pub distribution: RowDistributionBucket,
+    /// Device identifier
+    pub device: String,
+}
+
+#[derive(Clone)]
+pub struct AutotuneResult {
+    /// Best algorithm
+    pub best_algorithm: AlgorithmId,
+    /// Best tile configuration
+    pub best_tile_config: Option<TileConfig>,
+    /// Timing in microseconds
+    pub time_us: f32,
+    /// When this was tuned
+    pub timestamp: SystemTime,
+}
+30.2 Tuning Process
+rustimpl<R: Runtime> SparseAutotuner<R> {
+    /// Tune SpMM for given input characteristics
+    pub fn tune_spmm(
+        &mut self,
+        a_meta: &CsrMetadata,
+        n_cols_dense: usize,
+        client: &ComputeClient<...>,
+    ) -> CsrSpmmAlgorithm {
+        let key = AutotuneKey {
+            op: SparseOpType::SpMM,
+            format: SparseFormatId::Csr,
+            shape: ShapeBucket::from_dims(a_meta.rows, a_meta.cols, n_cols_dense),
+            sparsity: SparsityBucket::from_ratio(a_meta.sparsity()),
+            distribution: a_meta.row_stats.as_ref()
+                .map(|s| RowDistributionBucket::from_cv(s.cv()))
+                .unwrap_or(RowDistributionBucket::Unknown),
+            device: client.device_name(),
+        };
+        
+        // Check cache
+        if let Some(result) = self.database.get(&key) {
+            return result.best_algorithm.into();
+        }
+        
+        // Generate test data
+        let a_test = generate_test_sparse(&a_meta, client);
+        let b_test = generate_test_dense(a_meta.cols, n_cols_dense, client);
+        
+        // Candidate algorithms
+        let candidates = [
+            CsrSpmmAlgorithm::RowSplit,
+            CsrSpmmAlgorithm::WarpPerRow,
+            CsrSpmmAlgorithm::MergeBasedRowSplit,
+            CsrSpmmAlgorithm::Vectorized { width: 4 },
+        ];
+        
+        // Time each candidate
+        let mut best: Option<(CsrSpmmAlgorithm, f32)> = None;
+        
+        for alg in &candidates {
+            let time = self.time_algorithm(*alg, &a_test, &b_test, client);
+            
+            if best.is_none() || time < best.unwrap().1 {
+                best = Some((*alg, time));
+            }
+        }
+        
+        let (best_alg, best_time) = best.unwrap();
+        
+        // Store result
+        self.database.insert(key, AutotuneResult {
+            best_algorithm: best_alg.into(),
+            best_tile_config: None,
+            time_us: best_time,
+            timestamp: SystemTime::now(),
+        });
+        
+        best_alg
+    }
+    
+    /// Time a single algorithm
+    fn time_algorithm(
+        &self,
+        alg: CsrSpmmAlgorithm,
+        a: &CsrStorage<R>,
+        b: &Tensor<R>,
+        client: &ComputeClient<...>,
+    ) -> f32 {
+        // Warmup
+        for _ in 0..self.warmup_runs {
+            let _ = csr_spmm_with_algorithm(a, b, alg, client);
+        }
+        
+        client.sync();
+        
+        // Timed runs
+        let start = Instant::now();
+        for _ in 0..self.timed_runs {
+            let _ = csr_spmm_with_algorithm(a, b, alg, client);
+        }
+        client.sync();
+        let elapsed = start.elapsed();
+        
+        (elapsed.as_micros() as f32) / (self.timed_runs as f32)
+    }
+}
+30.3 Tile Size Search
+rust/// Search for optimal tile configuration
+pub struct TileSizeSearcher<R: Runtime> {
+    /// Candidate tile sizes to try
+    candidates: Vec<TileConfig>,
+}
+
+impl<R: Runtime> TileSizeSearcher<R> {
+    /// Default candidate tile sizes
+    pub fn default_candidates() -> Self {
+        Self {
+            candidates: vec![
+                TileConfig { tile_m: 32, tile_n: 32, tile_k: 32 },
+                TileConfig { tile_m: 64, tile_n: 64, tile_k: 32 },
+                TileConfig { tile_m: 128, tile_n: 64, tile_k: 32 },
+                TileConfig { tile_m: 64, tile_n: 128, tile_k: 32 },
+                TileConfig { tile_m: 128, tile_n: 128, tile_k: 32 },
+                TileConfig { tile_m: 256, tile_n: 64, tile_k: 32 },
+                // Tensor core sizes
+                TileConfig { tile_m: 16, tile_n: 16, tile_k: 16 },
+                TileConfig { tile_m: 32, tile_n: 16, tile_k: 16 },
+            ],
+        }
+    }
+    
+    /// Search for best tile size
+    pub fn search(
+        &self,
+        op: &dyn SparseOperation<R>,
+        test_input: &SparseTensor<R>,
+        client: &ComputeClient<...>,
+    ) -> TileConfig {
+        let mut best: Option<(TileConfig, f32)> = None;
+        
+        for config in &self.candidates {
+            // Skip invalid configs for this shape
+            if !config.is_valid_for(test_input.shape()) {
+                continue;
+            }
+            
+            let time = time_with_config(op, test_input, *config, client);
+            
+            if best.is_none() || time < best.unwrap().1 {
+                best = Some((*config, time));
+            }
+        }
+        
+        best.map(|(c, _)| c).unwrap_or(self.candidates[0])
+    }
+}
+30.4 Persistent Database
+rustimpl AutotuneDatabase {
+    /// Load from disk
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, io::Error> {
+        let path = path.as_ref();
+        if path.exists() {
+            let data = fs::read(path)?;
+            let results: HashMap<AutotuneKey, AutotuneResult> = bincode::deserialize(&data)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(Self { results, path: Some(path.to_owned()) })
+        } else {
+            Ok(Self { results: HashMap::new(), path: Some(path.to_owned()) })
+        }
+    }
+    
+    /// Save to disk
+    pub fn save(&self) -> Result<(), io::Error> {
+        if let Some(ref path) = self.path {
+            let data = bincode::serialize(&self.results)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            fs::write(path, data)?;
+        }
+        Ok(())
+    }
+    
+    /// Invalidate old results
+    pub fn prune_old(&mut self, max_age: Duration) {
+        let now = SystemTime::now();
+        self.results.retain(|_, result| {
+            now.duration_since(result.timestamp)
+                .map(|age| age < max_age)
+                .unwrap_or(true)
+        });
+    }
+}
+
+31. Mask Scheduling
+31.1 Sparsity Schedules
+rust/// Sparsity schedule function
+pub trait SparsitySchedule: Send + Sync {
+    /// Get sparsity ratio at given step
+    fn sparsity_at(&self, step: usize) -> f32;
+    
+    /// Whether schedule is complete
+    fn is_complete(&self, step: usize) -> bool;
+}
+
+/// Linear schedule: sparsity increases linearly
+pub struct LinearSchedule {
+    pub initial_sparsity: f32,
+    pub final_sparsity: f32,
+    pub start_step: usize,
+    pub end_step: usize,
+}
+
+impl SparsitySchedule for LinearSchedule {
+    fn sparsity_at(&self, step: usize) -> f32 {
+        if step < self.start_step {
+            self.initial_sparsity
+        } else if step >= self.end_step {
+            self.final_sparsity
+        } else {
+            let progress = (step - self.start_step) as f32 
+                / (self.end_step - self.start_step) as f32;
+            self.initial_sparsity + progress * (self.final_sparsity - self.initial_sparsity)
+        }
+    }
+    
+    fn is_complete(&self, step: usize) -> bool {
+        step >= self.end_step
+    }
+}
+
+/// Cubic schedule (from Zhu & Gupta, 2017)
+/// More gradual at start, aggressive at end
+pub struct CubicSchedule {
+    pub initial_sparsity: f32,
+    pub final_sparsity: f32,
+    pub start_step: usize,
+    pub end_step: usize,
+}
+
+impl SparsitySchedule for CubicSchedule {
+    fn sparsity_at(&self, step: usize) -> f32 {
+        if step < self.start_step {
+            self.initial_sparsity
+        } else if step >= self.end_step {
+            self.final_sparsity
+        } else {
+            let t = (step - self.start_step) as f32 
+                / (self.end_step - self.start_step) as f32;
+            // s_t = s_f + (s_i - s_f) * (1 - t)^3
+            self.final_sparsity + 
+                (self.initial_sparsity - self.final_sparsity) * (1.0 - t).powi(3)
+        }
+    }
+    
+    fn is_complete(&self, step: usize) -> bool {
+        step >= self.end_step
+    }
+}
+
+/// Exponential schedule
+pub struct ExponentialSchedule {
+    pub initial_sparsity: f32,
+    pub final_sparsity: f32,
+    pub decay_steps: usize,
+    pub start_step: usize,
+}
+
+impl SparsitySchedule for ExponentialSchedule {
+    fn sparsity_at(&self, step: usize) -> f32 {
+        if step < self.start_step {
+            self.initial_sparsity
+        } else {
+            let elapsed = step - self.start_step;
+            let decay = (-elapsed as f32 / self.decay_steps as f32).exp();
+            self.final_sparsity + (self.initial_sparsity - self.final_sparsity) * decay
+        }
+    }
+    
+    fn is_complete(&self, step: usize) -> bool {
+        self.sparsity_at(step) >= self.final_sparsity * 0.99
+    }
+}
+
+/// One-shot schedule (prune once at specific step)
+pub struct OneShotSchedule {
+    pub prune_step: usize,
+    pub target_sparsity: f32,
+}
+
+impl SparsitySchedule for OneShotSchedule {
+    fn sparsity_at(&self, step: usize) -> f32 {
+        if step < self.prune_step {
+            0.0
+        } else {
+            self.target_sparsity
+        }
+    }
+    
+    fn is_complete(&self, step: usize) -> bool {
+        step >= self.prune_step
+    }
+}
+31.2 Mask Update Scheduler
+rust/// When to update masks during training
+pub struct MaskUpdateScheduler {
+    /// Sparsity schedule
+    pub sparsity_schedule: Box<dyn SparsitySchedule>,
+    /// How often to update mask (in steps)
+    pub update_frequency: usize,
+    /// Warmup steps before first pruning
+    pub warmup_steps: usize,
+    /// Whether to allow mask regrowth
+    pub allow_regrowth: bool,
+    /// Regrowth fraction (for RigL-style)
+    pub regrowth_fraction: f32,
+}
+
+impl MaskUpdateScheduler {
+    /// Check if mask should be updated at this step
+    pub fn should_update(&self, step: usize) -> bool {
+        if step < self.warmup_steps {
+            return false;
+        }
+        
+        let steps_since_warmup = step - self.warmup_steps;
+        steps_since_warmup % self.update_frequency == 0
+    }
+    
+    /// Get target sparsity for this step
+    pub fn target_sparsity(&self, step: usize) -> f32 {
+        self.sparsity_schedule.sparsity_at(step)
+    }
+    
+    /// Apply scheduled mask update
+    pub fn update_mask<R: Runtime>(
+        &self,
+        param: &mut SparseParameter<R>,
+        gradients: Option<&Tensor<R>>,
+        step: usize,
+        client: &ComputeClient<...>,
+    ) {
+        if !self.should_update(step) {
+            return;
+        }
+        
+        let target_sparsity = self.target_sparsity(step);
+        let current_sparsity = param.storage.sparsity();
+        
+        if target_sparsity > current_sparsity {
+            // Need to prune more
+            let to_prune = compute_prune_count(
+                param.storage.meta.nnz,
+                current_sparsity,
+                target_sparsity,
+            );
+            
+            // Prune lowest magnitude
+            prune_lowest_magnitude(param, to_prune, client);
+        }
+        
+        if self.allow_regrowth && gradients.is_some() {
+            let to_regrow = (param.storage.meta.nnz as f32 * self.regrowth_fraction) as usize;
+            
+            // Regrow based on gradient magnitude
+            regrow_highest_gradient(
+                param,
+                gradients.unwrap(),
+                to_regrow,
+                client,
+            );
+        }
+    }
+}
+
+/// Gradual magnitude pruning controller
+pub struct GradualPruningController<R: Runtime> {
+    /// Scheduler
+    scheduler: MaskUpdateScheduler,
+    /// Parameters being pruned
+    params: Vec<SparseParameter<R>>,
+    /// Current step
+    step: usize,
+}
+
+impl<R: Runtime> GradualPruningController<R> {
+    /// Call at each training step
+    pub fn step(&mut self, gradients: &[Tensor<R>], client: &ComputeClient<...>) {
+        self.step += 1;
+        
+        if self.scheduler.should_update(self.step) {
+            for (param, grad) in self.params.iter_mut().zip(gradients.iter()) {
+                self.scheduler.update_mask(param, Some(grad), self.step, client);
+            }
+        }
+    }
+    
+    /// Get current sparsity across all params
+    pub fn current_sparsity(&self) -> f32 {
+        let total_nnz: usize = self.params.iter().map(|p| p.storage.meta.nnz).sum();
+        let total_elements: usize = self.params.iter()
+            .map(|p| p.storage.meta.rows * p.storage.meta.cols)
+            .sum();
+        1.0 - (total_nnz as f32 / total_elements as f32)
+    }
+}
+
+32. Sparsity Regularization
+32.1 L1 Regularization
+rust/// L1 regularization to induce sparsity
+pub struct L1Regularization {
+    pub lambda: f32,
+}
+
+impl L1Regularization {
+    /// Add L1 penalty to loss
+    /// L1_loss = lambda * sum(|weights|)
+    pub fn loss<R: Runtime>(
+        &self,
+        params: &[&SparseParameter<R>],
+        client: &ComputeClient<...>,
+    ) -> f32 {
+        let mut total = 0.0f32;
+        for param in params {
+            total += sparse_l1_norm(&param.storage, client);
+        }
+        self.lambda * total
+    }
+    
+    /// Add L1 gradient to existing gradient
+    /// dL1/dw = lambda * sign(w)
+    pub fn add_gradient<R: Runtime>(
+        &self,
+        param: &SparseParameter<R>,
+        grad: &mut CsrStorage<R>,
+        client: &ComputeClient<...>,
+    ) {
+        // grad += lambda * sign(param.values)
+        sparse_add_sign_scaled(grad, &param.storage, self.lambda, client);
+    }
+}
+
+/// Kernel: grad += alpha * sign(x)
+#[cube(launch)]
+pub fn sparse_add_sign_kernel<F: Float>(
+    grad_values: &mut Array<F>,
+    x_values: &Array<F>,
+    alpha: F,
+    #[comptime] nnz: u32,
+) {
+    let idx = ABSOLUTE_POS_X as u32;
+    if idx >= nnz {
+        return;
+    }
+    
+    let sign = if x_values[idx] > F::new(0.0) {
+        F::new(1.0)
+    } else if x_values[idx] < F::new(0.0) {
+        F::new(-1.0)
+    } else {
+        F::new(0.0)
+    };
+    
+    grad_values[idx] = grad_values[idx] + alpha * sign;
+}
+32.2 Proximal Gradient (Soft Thresholding)
+rust/// Proximal operator for L1 (soft thresholding)
+/// Used in proximal gradient methods
+pub struct ProximalL1 {
+    pub lambda: f32,
+}
+
+impl ProximalL1 {
+    /// Apply soft thresholding: sign(x) * max(|x| - lambda, 0)
+    pub fn apply<R: Runtime>(
+        &self,
+        param: &mut SparseParameter<R>,
+        client: &ComputeClient<...>,
+    ) {
+        soft_threshold_inplace(&mut param.storage, self.lambda, client);
+    }
+}
+
+/// Kernel: x = sign(x) * max(|x| - threshold, 0)
+#[cube(launch)]
+pub fn soft_threshold_kernel<F: Float>(
+    values: &mut Array<F>,
+    threshold: F,
+    #[comptime] nnz: u32,
+) {
+    let idx = ABSOLUTE_POS_X as u32;
+    if idx >= nnz {
+        return;
+    }
+    
+    let x = values[idx];
+    let abs_x = abs(x);
+    
+    if abs_x <= threshold {
+        values[idx] = F::new(0.0);
+    } else {
+        let sign = if x > F::new(0.0) { F::new(1.0) } else { F::new(-1.0) };
+        values[idx] = sign * (abs_x - threshold);
+    }
+}
+32.3 Group Sparsity
+rust/// Group sparsity regularization (L2,1 norm)
+/// Encourages entire rows/columns to be zero
+pub struct GroupSparsityRegularization {
+    pub lambda: f32,
+    pub group_dim: usize,  // 0 = row groups, 1 = column groups
+}
+
+impl GroupSparsityRegularization {
+    /// L2,1 loss = lambda * sum_groups(||group||_2)
+    pub fn loss<R: Runtime>(
+        &self,
+        param: &SparseParameter<R>,
+        client: &ComputeClient<...>,
+    ) -> f32 {
+        let group_norms = compute_group_norms(&param.storage, self.group_dim, client);
+        let sum: f32 = group_norms.iter().sum();
+        self.lambda * sum
+    }
+    
+    /// Gradient of L2,1 norm
+    /// d/dw_g = lambda * w_g / ||w_g||_2
+    pub fn gradient<R: Runtime>(
+        &self,
+        param: &SparseParameter<R>,
+        client: &ComputeClient<...>,
+    ) -> CsrStorage<R> {
+        group_sparsity_gradient(&param.storage, self.group_dim, self.lambda, client)
+    }
+}
+
+33. Sparse Attention Interface
+Interface design for sparse attention (implementation deferred).
+33.1 Attention Pattern Types
+rust/// Sparse attention pattern specification
+#[derive(Clone, Debug)]
+pub enum SparseAttentionPattern {
+    /// Full attention (not sparse, baseline)
+    Full,
+    
+    /// Local window attention
+    /// Each position attends to [pos - window, pos + window]
+    Local { 
+        window_size: usize,
+        /// Whether window wraps around (causal = no wrap)
+        causal: bool,
+    },
+    
+    /// Strided attention (Sparse Transformer style)
+    /// Attend to every k-th position
+    Strided { 
+        stride: usize,
+        /// Also include local window
+        local_window: Option<usize>,
+    },
+    
+    /// Block sparse attention
+    /// Divide into blocks, attend within and across selected blocks
+    BlockSparse {
+        block_size: usize,
+        /// Which block pairs can attend to each other
+        block_pattern: BlockAttentionPattern,
+    },
+    
+    /// BigBird-style attention
+    /// Combines local + global + random
+    BigBird {
+        local_window: usize,
+        num_global_tokens: usize,
+        num_random_blocks: usize,
+        block_size: usize,
+    },
+    
+    /// Longformer-style attention
+    /// Local window + task-specific global tokens
+    Longformer {
+        local_window: usize,
+        global_token_indices: Vec<usize>,
+    },
+    
+    /// Learned/dynamic pattern
+    /// Pattern determined at runtime based on input
+    Learned {
+        /// Top-k attention per query
+        top_k: usize,
+        /// Temperature for softmax
+        temperature: f32,
+    },
+    
+    /// Custom pattern from explicit mask
+    Custom {
+        /// Sparsity pattern as CSR
+        pattern: SparsityPatternId,
+    },
+}
+
+/// Block attention pattern specification
+#[derive(Clone, Debug)]
+pub enum BlockAttentionPattern {
+    /// Each block attends to itself
+    Diagonal,
+    /// Each block attends to itself and neighbors
+    Banded { num_bands: usize },
+    /// Explicit block connectivity matrix
+    Explicit { connectivity: Vec<Vec<bool>> },
+}
+33.2 Sparse Attention Interface
+rust/// Sparse attention module interface
+pub trait SparseAttention<R: Runtime> {
+    /// Attention pattern type
+    fn pattern(&self) -> &SparseAttentionPattern;
+    
+    /// Forward pass
+    /// Q, K, V: [batch, seq_len, head_dim] or [batch, heads, seq_len, head_dim]
+    fn forward(
+        &self,
+        query: &Tensor<R>,
+        key: &Tensor<R>,
+        value: &Tensor<R>,
+        mask: Option<&SparseTensor<R>>,
+        client: &ComputeClient<...>,
+    ) -> Tensor<R>;
+    
+    /// Get or compute attention pattern for given sequence length
+    fn get_pattern(
+        &self,
+        seq_len: usize,
+        client: &ComputeClient<...>,
+    ) -> SparsityPattern<R>;
+    
+    /// Estimated FLOPs for given sequence length
+    fn estimated_flops(&self, seq_len: usize, head_dim: usize) -> usize;
+    
+    /// Estimated memory for given sequence length
+    fn estimated_memory(&self, seq_len: usize, head_dim: usize, batch_size: usize) -> usize;
+}
+
+/// Sparse attention configuration
+#[derive(Clone, Debug)]
+pub struct SparseAttentionConfig {
+    /// Attention pattern
+    pub pattern: SparseAttentionPattern,
+    /// Number of attention heads
+    pub num_heads: usize,
+    /// Head dimension
+    pub head_dim: usize,
+    /// Dropout probability
+    pub dropout: f32,
+    /// Whether to use causal masking
+    pub causal: bool,
+    /// Scale factor (default: 1/sqrt(head_dim))
+    pub scale: Option<f32>,
+}
+
+/// Builder for sparse attention
+pub struct SparseAttentionBuilder {
+    config: SparseAttentionConfig,
+}
+
+impl SparseAttentionBuilder {
+    pub fn local(window_size: usize) -> Self {
+        Self {
+            config: SparseAttentionConfig {
+                pattern: SparseAttentionPattern::Local { 
+                    window_size, 
+                    causal: false 
+                },
+                ..Default::default()
+            },
+        }
+    }
+    
+    pub fn bigbird(local_window: usize, num_global: usize, num_random: usize) -> Self {
+        Self {
+            config: SparseAttentionConfig {
+                pattern: SparseAttentionPattern::BigBird {
+                    local_window,
+                    num_global_tokens: num_global,
+                    num_random_blocks: num_random,
+                    block_size: 64,
+                },
+                ..Default::default()
+            },
+        }
+    }
+    
+    pub fn causal(mut self) -> Self {
+        self.config.causal = true;
+        if let SparseAttentionPattern::Local { window_size, .. } = self.config.pattern {
+            self.config.pattern = SparseAttentionPattern::Local { 
+                window_size, 
+                causal: true 
+            };
+        }
+        self
+    }
+    
+    pub fn num_heads(mut self, num_heads: usize) -> Self {
+        self.config.num_heads = num_heads;
+        self
+    }
+    
+    pub fn head_dim(mut self, head_dim: usize) -> Self {
+        self.config.head_dim = head_dim;
+        self
+    }
+    
+    pub fn build<R: Runtime>(self, client: &ComputeClient<...>) -> Box<dyn SparseAttention<R>> {
+        // Build appropriate implementation based on pattern
+        match &self.config.pattern {
+            SparseAttentionPattern::Local { .. } => {
+                Box::new(LocalSparseAttention::new(self.config, client))
+            }
+            SparseAttentionPattern::BigBird { .. } => {
+                Box::new(BigBirdAttention::new(self.config, client))
+            }
+            _ => todo!("Other attention patterns"),
+        }
+    }
+}
+33.3 Pattern Generation
+rust/// Generate sparse attention pattern
+pub struct AttentionPatternGenerator;
+
+impl AttentionPatternGenerator {
+    /// Generate local attention pattern
+    pub fn local<R: Runtime>(
+        seq_len: usize,
+        window_size: usize,
+        causal: bool,
+        client: &ComputeClient<...>,
+    ) -> SparsityPattern<R> {
+        // Pattern: position i attends to [max(0, i-w), min(seq_len, i+w+1)]
+        // If causal: [max(0, i-w), i+1]
+        
+        let mut row_ptrs = vec![0u32];
+        let mut col_indices = Vec::new();
+        
+        for i in 0..seq_len {
+            let start = i.saturating_sub(window_size);
+            let end = if causal { 
+                i + 1 
+            } else { 
+                (i + window_size + 1).min(seq_len) 
+            };
+            
+            for j in start..end {
+                col_indices.push(j as u32);
+            }
+            row_ptrs.push(col_indices.len() as u32);
+        }
+        
+        SparsityPattern::from_csr_indices(row_ptrs, col_indices, seq_len, seq_len, client)
+    }
+    
+    /// Generate BigBird pattern
+    pub fn bigbird<R: Runtime>(
+        seq_len: usize,
+        local_window: usize,
+        num_global: usize,
+        num_random: usize,
+        block_size: usize,
+        client: &ComputeClient<...>,
+    ) -> SparsityPattern<R> {
+        let local = Self::local(seq_len, local_window, false, client);
+        let global = Self::global_tokens(seq_len, num_global, client);
+        let random = Self::random_blocks(seq_len, block_size, num_random, client);
+        
+        // Union patterns
+        let combined = PatternOps::union(&local, &global, client);
+        PatternOps::union(&combined, &random, client)
+    }
+    
+    /// Generate global token pattern (first/last tokens attend to all)
+    pub fn global_tokens<R: Runtime>(
+        seq_len: usize,
+        num_global: usize,
+        client: &ComputeClient<...>,
+    ) -> SparsityPattern<R> {
+        // Global tokens: indices 0..num_global attend to all, all attend to them
+        todo!()
+    }
+    
+    /// Generate random block pattern
+    pub fn random_blocks<R: Runtime>(
+        seq_len: usize,
+        block_size: usize,
+        num_random: usize,
+        client: &ComputeClient<...>,
+    ) -> SparsityPattern<R> {
+        todo!()
+    }
+}
+
+34. Updated Roadmap Additions
+34.1 SpGEMM Phase (Insert after Phase 5)
+Phase 5.5: SpGEMM (2 weeks)
+├── Milestone 5.5.1: Two-Phase SpGEMM
+│   ├── Symbolic phase kernel (nnz counting)
+│   ├── Numeric phase kernel
+│   └── Correctness tests
+├── Milestone 5.5.2: SpGEMM Autodiff
+│   ├── Backward kernels
+│   ├── Pattern masking
+│   └── Gradient tests
+└── Milestone 5.5.3: Pattern Operations
+    ├── Union, intersection, difference
+    └── Dynamic sparsity integration
+34.2 Extended Phase 2 (Optimizers)
+Phase 2 additions:
+├── Milestone 2.6: Sparse Optimizers
+│   ├── Sparse SGD with momentum
+│   ├── Sparse Adam
+│   ├── Gradient clipping utilities
+│   └── Optimizer state serialization
+└── Milestone 2.7: Regularization
+    ├── L1 regularization
+    ├── Proximal gradient (soft thresholding)
+    └── Group sparsity (optional)
+34.3 Extended Phase 5 (Scheduling)
+Phase 5 additions:
+├── Milestone 5.7: Mask Scheduling
+│   ├── Sparsity schedule functions
+│   ├── MaskUpdateScheduler
+│   ├── GradualPruningController
+│   └── Integration tests
+34.4 Phase 6 Addition (Autotuning)
+Phase 6 additions:
+├── Milestone 6.7: Autotuning
+│   ├── AutotuneDatabase
+│   ├── SparseAutotuner
+│   ├── Tile size search
+│   └── Persistent database save/load
+34.5 Future Phase: Sparse Attention
+Phase 7: Sparse Attention (Future, 4+ weeks)
+├── Milestone 7.1: Pattern Generation
+│   ├── Local pattern
+│   ├── BigBird pattern
+│   └── Custom pattern support
+├── Milestone 7.2: Sparse Attention Kernels
+│   ├── Q @ K^T with sparse output
+│   ├── Sparse softmax
+│   └── Attention @ V
+├── Milestone 7.3: Flash Attention Integration
+│   ├── Block-sparse flash attention
+│   └── Memory-efficient backward
+└── Milestone 7.4: Attention Modules
+    ├── SparseMultiHeadAttention
+    └── Integration with Burn transformers
+
+35. Extended File Structure
+cubecl-sparse/src/
+├── ... (from Parts 1 & 2)
+│
+├── spgemm/                       # SpGEMM (Section 27)
+│   ├── mod.rs
+│   ├── symbolic.rs               # Symbolic phase
+│   ├── numeric.rs                # Numeric phase
+│   ├── hash_based.rs             # Hash-based algorithm
+│   └── backward.rs               # SpGEMM autodiff
+│
+├── pattern_ops/                  # Pattern operations (Section 27.6)
+│   ├── mod.rs
+│   ├── union.rs
+│   ├── intersection.rs
+│   └── difference.rs
+│
+├── optim/                        # Optimizers (Section 28)
+│   ├── mod.rs
+│   ├── sgd.rs                    # Sparse SGD
+│   ├── adam.rs                   # Sparse Adam
+│   ├── clip.rs                   # Gradient clipping
+│   └── state.rs                  # Optimizer state
+│
+├── regularize/                   # Regularization (Section 32)
+│   ├── mod.rs
+│   ├── l1.rs
+│   ├── proximal.rs
+│   └── group.rs
+│
+├── schedule/                     # Mask scheduling (Section 31)
+│   ├── mod.rs
+│   ├── sparsity_schedule.rs
+│   └── mask_scheduler.rs
+│
+├── autotune/                     # Autotuning (Section 30)
+│   ├── mod.rs
+│   ├── tuner.rs
+│   ├── database.rs
+│   └── tile_search.rs
+│
+└── attention/                    # Sparse attention (Section 33)
+    ├── mod.rs
+    ├── pattern.rs                # Pattern types
+    ├── interface.rs              # Trait definition
+    └── generator.rs              # Pattern generation
+
+Summary of Additions
+SectionContentPriority27. SpGEMMSparse × sparse matmul, pattern opsHigh28. Sparse OptimizersSGD, Adam, gradient clippingHigh29. Thread SafetySend/Sync, concurrent accessMedium30. AutotuningRuntime kernel selectionMedium31. Mask SchedulingGradual pruning schedulesMedium32. RegularizationL1, proximal, group sparsityLow33. Sparse AttentionInterface design (impl deferred)Future
+Total additions: ~2000 lines of spec
+Updated timeline impact:
+
+Phase 2: +1 week for optimizers
+Phase 5: +0.5 week for scheduling
+Phase 5.5 (new): +2 weeks for SpGEMM
+Phase 6: +0.5 week for autotuning
+
+Revised total: ~25 weeks (was 21)
+
+task: add SDDMM

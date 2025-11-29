@@ -6,8 +6,12 @@ license.workspace = true
 description = "GPU-accelerated sparse tensor operations for CubeCL"
 
 [dependencies]
-cubecl-core = { path = "../cubecl-core", version = "0.2.0" }
-cubecl-runtime = { path = "../cubecl-runtime", version = "0.2.0" }
+cubecl-common = { path = "../cubecl-common", version = "=0.9.0-pre.3", default-features = false }
+cubecl-core = { path = "../cubecl-core", version = "=0.9.0-pre.3", default-features = false }
+cubecl-runtime = { path = "../cubecl-runtime", version = "=0.9.0-pre.3", default-features = false }
+cubecl-std = { path = "../cubecl-std", version = "=0.9.0-pre.3", default-features = false }
+cubecl-matmul = { path = "../cubecl-matmul", version = "=0.9.0-pre.3", default-features = false }
+cubecl-random = { path = "../cubecl-random", version = "=0.9.0-pre.3", default-features = false }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.145"
@@ -19,8 +23,8 @@ criterion = "0.7.0"
 
 [features]
 default = []
-cuda = ["cubecl-core/cuda"]
-wgpu = ["cubecl-core/wgpu"]
+cuda = ["cubecl-cuda"]
+wgpu = ["cubecl-wgpu"]
 
 [[bench]]
 name = "spmm"

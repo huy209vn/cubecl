@@ -1,7 +1,17 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(cat:*)",
+      "Bash(dir:*)",
+      "Bash(cargo check:*)",
+      "Bash(find:*)",
+      "Bash(for f in csc.rs coo.rs nm.rs bsr.rs bcsc.rs)",
+      "Bash(do sed -i 's/impl<S, C> /impl /g; s/ for [A-Za-z]*Storage<S, C>/ for &/g; s/where\\s*$/where/g; s/ComputeClient<S, C>/ComputeClient<R>/g' $f)",
+      "Bash(done)",
+      "Bash(1)",
+      "Bash(git checkout:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

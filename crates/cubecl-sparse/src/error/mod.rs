@@ -1,9 +1,9 @@
 //! Error types for sparse operations
 
 use std::io;
+use cubecl_core::ir::StorageType;
 
 use crate::format::SparseFormatId;
-use crate::dtype::DType;
 
 /// Result type for sparse operations
 pub type SparseResult<T> = Result<T, SparseError>;
@@ -86,7 +86,7 @@ pub enum SparseError {
     // DType errors
     #[error("Unsupported dtype {dtype:?} for format {format:?}")]
     UnsupportedDType {
-        dtype: DType,
+        dtype: StorageType,
         format: SparseFormatId,
     },
 

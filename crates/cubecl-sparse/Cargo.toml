@@ -23,9 +23,4 @@ criterion = "0.7.0"
 
 [features]
 default = []
-cuda = ["cubecl-cuda"]
-wgpu = ["cubecl-wgpu"]
-
-[[bench]]
-name = "spmm"
-harness = false
+std = []

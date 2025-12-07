@@ -21,8 +21,9 @@
 //! let result = sparse_matmul(&sparse, &dense_matrix, &client);
 //! ```
 
-#![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
+
+extern crate alloc;
 
 pub mod algorithm;
 pub mod batch;
@@ -51,7 +52,7 @@ pub mod prelude {
         SparseMetadata, SparseStorage,
     };
     pub use crate::handle::{SparseTensor, SparseTensorHandle, SparseTensorHandleRef};
-    pub use crate::ops::spmm::{csr_spmm, CsrSpmmAlgorithm};
-    pub use crate::ops::SparseOperation;
-    pub use crate::prune::{Pruner, PruningStrategy};
+    pub use crate::ops::spmm::{spmm, spmm_with_config, spmm_cached, SpmmConfig};
+    pub use crate::ops::traits::SparseOperation;
+    pub use crate::prune::strategies::{Pruner, PruningStrategy};
 }

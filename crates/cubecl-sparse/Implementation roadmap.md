@@ -1533,3 +1533,387 @@ Phase 0 (2w) → Phase 1 (3w) → Phase 2 (2w) → Phase 3 (5w) → Phase 4 (4w)
 Total: 19 weeks to trainable sparse models                                     ▼
                                                                          Can train!
 After Phase 5, you can train sparse models. Phases 6-9 add features and polish.
+
+SpMM Implementation Roadmap
+Scope: SpMM subsystem only, assumes format infrastructure exists
+Core Innovation: Adaptive Binned Gather-GEMM with tensor core acceleration
+
+Overview
+Phase 1: Analysis Infrastructure (2 weeks)
+    ↓
+Phase 2: Basic SpMM Algorithms (3 weeks)
+    ↓
+Phase 3: Gather-GEMM (3 weeks)  ← Our innovation
+    ↓
+Phase 4: Tile Classification + Handlers (2 weeks)
+    ↓
+Phase 5: Planning & Execution (2 weeks)
+    ↓
+Phase 6: Tensor Core Integration (2 weeks)
+    ↓
+Phase 7: Polish & Benchmarks (1 week)
+
+Total: ~15 weeks
+
+Phase 1: Analysis Infrastructure
+Goal: Statistics computation, row binning—foundation for algorithm selection
+Duration: 2 weeks
+Milestone 1.1: Matrix Statistics
+Tasks:
+├── MatrixStatistics struct
+│   ├── Basic: rows, cols, nnz, density
+│   ├── Row distribution: avg, std, min, max, cv
+│   ├── Histogram: power-of-2 buckets
+│   └── Structure hints: diagonal_dominance, estimated_bandwidth
+├── analyze_csr() GPU kernel
+│   ├── Single-pass over row_ptrs
+│   ├── Parallel reduction for sum/sum_sq/min/max
+│   └── Histogram via atomics
+└── Tests with known distributions
+
+Done when: Statistics match CPU reference implementation
+Milestone 1.2: Row Binning
+Tasks:
+├── BinId enum (Empty, Tiny, Small, Medium, Large, Huge)
+├── BinStrategy enum (Skip, RowSplit, WarpPerRow, GatherGemm, GatherTC, MergePath)
+├── RowBin struct
+│   ├── row_indices buffer
+│   ├── gather_cols buffer (flattened, padded)
+│   └── gather_vals buffer (flattened, padded)
+├── RowBinning struct
+├── create_binning() implementation
+│   ├── Count rows per bin
+│   ├── Allocate bin buffers
+│   ├── Populate with padding
+│   └── Select strategy per bin
+├── select_bin_strategy() heuristics
+└── Tests: verify binning preserves all data
+
+Done when: Can bin any CSR, reconstruct original values from bins
+
+Phase 2: Basic SpMM Algorithms
+Goal: Row-Split, Warp-Per-Row, Merge-Path kernels
+Duration: 3 weeks
+Milestone 2.1: Row-Split Kernel
+Tasks:
+├── Row-split algorithm
+│   ├── One thread per (row, col_tile)
+│   ├── Sequential over nnz
+│   └── Vectorized output (float4 when possible)
+├── Kernel implementation
+├── Launch configuration tuning
+├── Correctness tests vs dense matmul
+└── Performance baseline
+
+Done when: Correct, reasonable performance for avg_nnz < 8
+Milestone 2.2: Warp-Per-Row Kernel
+Tasks:
+├── Warp-per-row algorithm
+│   ├── 32 threads per row
+│   ├── Strided nnz iteration
+│   └── Warp shuffle reduction
+├── warp_reduce_sum() primitive
+├── Kernel implementation
+├── Vector variant (each lane handles multiple cols)
+├── Correctness tests
+└── Performance comparison vs row-split
+
+Done when: Faster than row-split for avg_nnz 8-64
+Milestone 2.3: Merge-Path Kernel
+Tasks:
+├── Merge-path concept
+│   ├── Work items = M + nnz
+│   ├── Even distribution across threads
+│   └── Binary search for starting position
+├── merge_path_search() implementation
+├── Kernel with atomic accumulation at row boundaries
+├── Tests with highly irregular matrices (cv > 2.0)
+└── Performance on power-law distributions
+
+Done when: Handles extreme irregularity correctly
+Milestone 2.4: Algorithm Dispatcher
+Tasks:
+├── SpmmAlgorithm enum
+├── select_algorithm() based on statistics
+├── dispatch_spmm() routing
+└── Basic spmm() public API
+
+Done when: Can call spmm(), auto-selects algorithm
+
+Phase 3: Gather-GEMM
+Goal: Our core innovation—convert sparse to gather + dense GEMM
+Duration: 3 weeks
+Milestone 3.1: Gather Infrastructure
+Tasks:
+├── Gather pattern analysis
+│   ├── Coalescing requirements
+│   └── Bank conflict avoidance
+├── Shared memory layout
+│   ├── GatherBLayout struct
+│   ├── Padding for bank conflicts
+│   └── Size calculations
+├── Cooperative gather kernel
+│   ├── Warp gathers one B row together
+│   ├── Coalesced B access
+│   └── Store to shared memory
+└── Gather bandwidth benchmarks
+
+Done when: Gather achieves >80% memory bandwidth
+Milestone 3.2: Gather-GEMM Kernel (CUDA Cores)
+Tasks:
+├── Kernel design
+│   ├── Phase 1: Cooperative gather B to smem
+│   ├── Phase 2: Dense GEMM on gathered data
+│   └── Write output via row_indices
+├── Tile size selection
+│   ├── batch_rows (shared memory limited)
+│   ├── tile_k (nnz dimension)
+│   └── tile_n (output columns)
+├── GatherGemmConfig struct
+├── Kernel implementation
+├── Integration with binning (execute per bin)
+├── Correctness tests
+└── Performance vs warp-per-row
+
+Done when: Faster than warp-per-row for avg_nnz > 32
+Milestone 3.3: Double Buffering
+Tasks:
+├── Pipeline design
+│   ├── Gather tile K+1 while computing tile K
+│   └── Two smem buffers
+├── Kernel modification for pipelining
+├── Async copy usage (where available)
+└── Performance improvement measurement
+
+Done when: Measurable latency hiding benefit
+
+Phase 4: Tile Classification + Handlers
+Goal: Detect and exploit structure in sparse matrices
+Duration: 2 weeks
+Milestone 4.1: Tile Decomposition
+Tasks:
+├── TileConfig struct
+├── TileClass enum (Empty, Dense, Banded, BlockSparse, Sparse)
+├── TileInfo struct
+├── TileDecomposition struct
+├── decompose_tiles() implementation
+│   ├── Partition matrix into tiles
+│   ├── Classify each tile
+│   └── Build decomposition
+├── Classification kernels
+│   ├── Density check
+│   ├── Banded detection (diagonal analysis)
+│   └── Block-sparse detection (try block sizes)
+└── Tests with synthetic structured matrices
+
+Done when: Correctly classifies tiles with known structure
+Milestone 4.2: Dense Tile Handler
+Tasks:
+├── extract_dense_tile() kernel
+│   ├── CSR tile → dense buffer
+│   └── Zero-fill missing positions
+├── DenseTileHandler
+│   └── Dispatch to cubecl-linalg GEMM
+├── Integration with plan execution
+└── Break-even analysis (when is extract+GEMM faster?)
+
+Done when: Dense tiles computed via GEMM correctly
+Milestone 4.3: Banded Tile Handler
+Tasks:
+├── Banded kernel design
+│   ├── Load only B rows within bandwidth
+│   └── Sliding window approach
+├── BandedTileHandler implementation
+├── Tests with tridiagonal, pentadiagonal matrices
+└── Performance vs general SpMM on banded
+
+Done when: Faster than general SpMM for banded patterns
+Milestone 4.4: Block-Sparse Tile Handler
+Tasks:
+├── Block extraction from CSR
+├── BlockSparseTileHandler
+│   └── Dense GEMM per block, accumulate
+├── Integration with BSR format (if tile is block-sparse, use BSR path)
+└── Tests with block-diagonal patterns
+
+Done when: Block structure exploited efficiently
+
+Phase 5: Planning & Execution
+Goal: Unified execution planning, plan caching
+Duration: 2 weeks
+Milestone 5.1: Execution Plan
+Tasks:
+├── ExecutionStep enum
+│   ├── DenseGemm { tile_idx }
+│   ├── BandedKernel { tile_idx }
+│   ├── BlockSparseKernel { tile_idx }
+│   └── BinnedSpMM { bin_idx }
+├── SpmmPlan struct
+│   ├── Analysis results
+│   ├── Tile decomposition
+│   ├── Binning
+│   ├── Extracted tile data
+│   └── Execution order
+├── SpmmPlan::create()
+│   ├── Run analysis
+│   ├── Decompose tiles
+│   ├── Extract special tiles
+│   ├── Create binning
+│   └── Build execution order
+└── Tests: plan creation for various matrix types
+
+Done when: Can create complete plan for any matrix
+Milestone 5.2: Plan Execution
+Tasks:
+├── SpmmPlan::execute()
+│   ├── Iterate execution steps
+│   ├── Dispatch to appropriate handler
+│   └── Return output
+├── Per-step execution methods
+│   ├── execute_dense_tile()
+│   ├── execute_banded_tile()
+│   ├── execute_block_sparse_tile()
+│   └── execute_bin()
+├── Output allocation
+└── End-to-end correctness tests
+
+Done when: Full plan execution matches reference
+Milestone 5.3: Plan Caching
+Tasks:
+├── SpmmPlanCache struct
+├── get_or_create() with matrix ID + N as key
+├── invalidate() for matrix changes
+├── Memory management (LRU eviction if needed)
+└── Cache hit rate tracking
+
+Done when: Repeated SpMM reuses plan efficiently
+
+Phase 6: Tensor Core Integration
+Goal: Gather-GEMM with tensor cores for maximum throughput
+Duration: 2 weeks
+Milestone 6.1: Device Capabilities
+Tasks:
+├── DeviceProperties struct
+│   ├── has_tensor_cores
+│   ├── tensor_core_generation
+│   ├── compute_capability
+│   └── max_shared_memory_per_block
+├── Query from CubeCL runtime
+├── Capability-based strategy selection
+└── Fallback paths when TC unavailable
+
+Done when: Can detect and use device capabilities
+Milestone 6.2: Gather-TensorCore Kernel
+Tasks:
+├── WMMA/CMMA tile configuration (16×16×16)
+├── Fragment loading from gathered data
+│   ├── A fragment from gather_vals
+│   └── B fragment from smem
+├── Kernel implementation
+│   ├── Gather phase (same as CUDA core)
+│   ├── Load fragments
+│   ├── cmma_compute()
+│   └── Store accumulator
+├── Precision configurations
+│   ├── fp16 → fp16
+│   ├── fp16 → fp32
+│   └── bf16 → fp32
+├── Integration with bin strategy selection
+└── Correctness tests (numerical accuracy)
+
+Done when: TC kernel correct, faster than CUDA core Gather-GEMM
+Milestone 6.3: Performance Validation
+Tasks:
+├── Benchmark suite
+│   ├── Synthetic matrices (random, banded, block)
+│   ├── SuiteSparse samples
+│   └── Various sizes and densities
+├── Comparison vs cuSPARSE
+├── Comparison vs basic SpMM (Phase 2)
+├── Winning regime identification
+└── Document performance model accuracy
+
+Target: 2-4× faster than cuSPARSE for avg_nnz > 32
+
+Phase 7: Polish & Benchmarks
+Goal: API cleanup, documentation, final benchmarks
+Duration: 1 week
+Milestone 7.1: Public API
+Tasks:
+├── spmm() - simple API
+├── spmm_with_config() - configurable
+├── spmm_plan() - plan creation
+├── SparseMatmul trait for CsrStorage
+├── SpmmConfig with sensible defaults
+└── API documentation
+
+Done when: Clean, ergonomic public interface
+Milestone 7.2: Transpose Operations
+Tasks:
+├── spmm_transpose_a() using CSC view
+├── spmm_transpose_b() with adjusted B access
+└── Tests for backward pass compatibility
+
+Done when: Transpose operations correct
+Milestone 7.3: Final Benchmarks
+Tasks:
+├── Comprehensive benchmark suite
+├── vs cuSPARSE comparison
+├── vs dense GEMM break-even
+├── Memory bandwidth analysis
+├── Document results
+└── Performance regression CI
+
+Done when: Clear understanding of performance characteristics
+
+Dependency Graph
+Phase 1: Analysis
+    │
+    ├──────────────┐
+    ▼              ▼
+Phase 2:       Phase 3:
+Basic SpMM     Gather-GEMM
+    │              │
+    └──────┬───────┘
+           ▼
+    Phase 4: Tile Classification
+           │
+           ▼
+    Phase 5: Planning
+           │
+           ▼
+    Phase 6: Tensor Cores
+           │
+           ▼
+    Phase 7: Polish
+
+Critical Path
+Statistics (1.1) → Binning (1.2) → Gather Infra (3.1) → Gather-GEMM (3.2) → TC Kernel (6.2)
+
+This path leads to our core innovation being functional.
+Everything else enables it or optimizes around it.
+
+Checkpoints
+After Phase 2
+
+ Basic SpMM works (row-split, warp-per-row, merge-path)
+ Auto-selection based on statistics
+ Correctness vs dense matmul
+
+After Phase 3
+
+ Gather-GEMM kernel functional
+ Faster than warp-per-row for medium density
+ Binned execution working
+
+After Phase 5
+
+ Full planning pipeline working
+ Tile classification functional
+ Plan caching working
+
+After Phase 6
+
+ Tensor core kernel on Ampere+
+ Performance target: 2-4× vs cuSPARSE
+ Fallback paths working
